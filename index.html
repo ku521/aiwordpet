@@ -1903,15 +1903,41 @@ function cloud(){
      写类操作传 force=true 强制先拉最新再改，避免把旧快照整表覆盖回去。 */
   var _TTS = 0;            /* _T 的拉取时刻 */
   var TABLE_TTL = 4000;    /* 4 秒：同一波重复调用合并成一次请求，又不耽误 20 秒轮询看新数据 */
+  /* 只在**第一次**拉表时做一次：把「本机有、云端没有」的账号并进云端表。
+     为什么必须有这一步：断网 / 没配云的时候孩子照样能注册能玩（本机模式），
+     那份进度只躺在 localStorage 里。改成「一律读云端」之后，如果直接拿云端表覆盖，
+     这份离线攒的进度就再也看不见了，而且下一次存档会把云端表写成没有它的样子 —— 真丢了。
+     补进去之后立刻上传一次，之后就严格走云端同步。
+     只做「云端缺的才补」，云端已有的以云端为准（不能反过来把别人的进度改成本机旧的）。 */
+  function mergeLocalOnly(t) {
+    return localRead().then(function (res) {
+      if (!res || !res.data || !res.data.t) return 0;
+      var lt = res.data.t, added = 0;
+      for (var k in lt) {
+        if (!Object.prototype.hasOwnProperty.call(lt, k)) continue;
+        if (String(k).slice(0, 2) === '__') continue;      /* 探针之类的内部键不算 */
+        if (!lt[k] || !lt[k].aid) continue;
+        if (!t.t[k]) { t.t[k] = lt[k]; added++; }
+      }
+      return added;
+    }).catch(function () { return 0; });
+  }
   function load(force) {
     if (_T && !force && (now() - _TTS) < TABLE_TTL) return Promise.resolve(_T);
+    var first = !_T;
     return raceRead().then(function (pick) {
       var t;
       if (pick.res && pick.res.data) { _T = norm(pick.res.data); _src = pick.n; }
       else { _T = { v: 1, t: {} }; _src = 'local'; }
       _TTS = now();
       t = _T;
-      return loadTail(t);
+      return (first ? mergeLocalOnly(t) : Promise.resolve(0)).then(function (added) {
+        var p = Promise.resolve(loadTail(t));
+        if (!added) return p;
+        /* 补进来的本地账号赶紧上云，别让它只活在这台设备上 */
+        return p.then(function () { return commit(); }).then(function () { return t; },
+          function () { return t; });
+      });
     });
   }
   /* load() 的后半段（播种管理员 / 补写备库），原逻辑不动 */
@@ -3173,6 +3199,7 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
 
 
 
