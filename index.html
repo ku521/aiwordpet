@@ -1851,9 +1851,29 @@ function cloud(){
   var READERS = { ts: tsRead, sb: sbRead, jb: jbRead, np: npRead, local: localRead };
   var WRITERS = { ts: tsWrite, sb: sbWrite, jb: jbWrite, np: npWrite, local: localWrite };
 
-  /* 并发探测：谁先带着数据回来就用谁（快的赢，慢的被记下来） */
+  /* 并发探测：谁先带着数据回来就用谁（快的赢，慢的被记下来）
+
+     [2026-10-06 修：好友在线不更新 / 消息收不到 / 礼包收不到 —— 就栽在这一句上]
+     本机（localStorage）绝不能参与竞速。它是同步返回的（0ms），必然赢过所有云端后端，
+     于是**每次读都拿到这台设备自己那份旧快照**：
+       ① 别人刚发的心跳、消息、礼包，本机一概看不见；
+       ② 更糟的是下一次写（存档 / 心跳 / 领礼包）会把这份旧快照整表覆盖回云端，
+          把别人的新数据一起抹掉 —— 表现就是「消息发出去了对方永远收不到」。
+     正确做法：**只有云端后端之间竞速**，本机退回到它该在的位置 ——
+     云端全挂或全空（第一次离线玩）时才兜底。 */
   function raceRead() {
-    var jobs = backendOrder().map(function (n) {
+    var names = backendOrder().filter(function (n) { return n !== 'local'; });
+    function localFallback() {
+      return localRead().then(function (res) {
+        _active = 'local';
+        return { n: 'local', res: res, ms: 0 };
+      }).catch(function () {
+        _active = 'local';
+        return { n: 'local', res: null, ms: 0 };
+      });
+    }
+    if (!names.length) return localFallback();          /* 一个云端都没配：只能本机 */
+    var jobs = names.map(function (n) {
       var t0 = tick();
       return READERS[n]().then(function (res) {
         var ms = tick() - t0;
@@ -1866,26 +1886,30 @@ function cloud(){
     });
     return Promise.all(jobs).then(function (outs) {
       var withData = outs.filter(function (o) { return o.res && o.res.data; });
-      var pick;
       if (withData.length) {
         withData.sort(function (a, b) { return a.ms - b.ms; });
-        pick = withData[0];
-      } else {
-        var okAny = outs.filter(function (o) { return !o.err; });
-        pick = okAny.length ? okAny[0] : { n: 'local', res: null };
+        _active = withData[0].n;
+        return withData[0];
       }
-      _active = pick.n;
-      return pick;
+      /* 云端全挂，或配了但全是空表 → 本机兜底（离线也能照常玩） */
+      return localFallback();
     });
   }
 
-  /* 首次进入：并发探测所有后端，取最快带着数据回来的那个 */
-  function load() {
-    if (_T) return Promise.resolve(_T);
+  /* 读表。
+     [2026-10-06] 以前是 `if (_T) return _T` —— 一张表只拉一次就永久缓存，
+     页面开一整天，好友名单/消息就永远是刚打开那一下的快照（前端 20 秒轮询也白轮询）。
+     现在按 TTL 复用：**超过 TTL 的读会自动重拉**，轮询才拿得到别人的新数据。
+     写类操作传 force=true 强制先拉最新再改，避免把旧快照整表覆盖回去。 */
+  var _TTS = 0;            /* _T 的拉取时刻 */
+  var TABLE_TTL = 4000;    /* 4 秒：同一波重复调用合并成一次请求，又不耽误 20 秒轮询看新数据 */
+  function load(force) {
+    if (_T && !force && (now() - _TTS) < TABLE_TTL) return Promise.resolve(_T);
     return raceRead().then(function (pick) {
       var t;
       if (pick.res && pick.res.data) { _T = norm(pick.res.data); _src = pick.n; }
       else { _T = { v: 1, t: {} }; _src = 'local'; }
+      _TTS = now();
       t = _T;
       return loadTail(t);
     });
@@ -1980,7 +2004,7 @@ function cloud(){
     var pw = String((b && b.p_pw) || '');
     if (!aid) return { ok: false, msg: '账号为空' };
     if (!pw) return { ok: false, msg: '密码为空' };
-    return load().then(function () {
+    return load(true).then(function () {        /* 注册要占用新账号，必须先看云端最新名单 */
       if (rec(aid)) return { ok: true, data: { ok: false, msg: '该账号已被占用，换一个或直接登录' } };
       var created = iso(new Date());
       var r = {
@@ -2002,7 +2026,7 @@ function cloud(){
 
   H.wc_login = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
-    return load().then(function () {
+    return load(true).then(function () {        /* 登录会刷新心跳并写库，先拿最新表 */
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在（账号是字母+数字，系统会自动转成大写后比对）' } };
       var pw = String((b && b.p_pw) || '');
@@ -2018,7 +2042,8 @@ function cloud(){
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
     var cp = cfgProblem();
     if (cp) return { ok: false, msg: cp };
-    return load().then(function () {
+    /* 存档是整表覆盖写：不先拉最新，就会把别人刚发的消息/心跳/礼包一起回滚掉 */
+    return load(true).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在，请先登录' } };
       var pw = String((b && b.p_pw) || '');
@@ -2055,7 +2080,9 @@ function cloud(){
   };
 
   H.wc_players = function () {
-    return load().then(function () {
+    /* 全班名单 = 在线状态：前端 20 秒轮询一次就看它，必须每次拿云端最新，
+       否则「谁在线」永远是刚打开页面那一下的合影。 */
+    return load(true).then(function () {
       var out = list().map(function (r) {
         return {
           acc_id: r.aid, name: r.name, av: r.av, on: online(r),
@@ -2068,7 +2095,7 @@ function cloud(){
   };
 
   H.wc_board = function (b) {
-    return load().then(function () {
+    return load(true).then(function () {      /* 排行榜同样要看到别人最新的经验值 */
       var all = list();
       var pw = String((b && b.p_admin) || '');
       /* 带上了管理口令就必须是真的管理口令：老写法是「管理口令就是某个账号的密码」，
@@ -2108,7 +2135,7 @@ function cloud(){
   H.wc_duel_result = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
     var id = String((b && b.p_id) || '');
-    return load().then(function () {
+    return load(true).then(function () {         /* 战绩要镜像写到对手那份，必须先看最新 */
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2152,7 +2179,7 @@ function cloud(){
   H.wc_change_aid = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
     var na = String((b && b.p_newaid) || '').trim().toUpperCase();
-    return load().then(function () {
+    return load(true).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2169,7 +2196,7 @@ function cloud(){
 
   H.wc_update_profile = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
-    return load().then(function () {
+    return load(true).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2241,7 +2268,15 @@ function cloud(){
     var aid = requireLogin(b);
     var act = String((b && b.p_action) || '');
     var arg = (b && b.p_arg) || {};
-    return load().then(function () {
+    /* 社交这一块几乎全是「要看别人刚发了什么」：好友申请、聊天记录、挑战列表……
+       读旧快照等于什么都没看到，所以**读写一律先拉最新**（前端轮询是 20 秒一拍，
+       不会打成风暴）。写类（心跳 / 申请 / 同意 / 发消息 / 发挑战 / 留言）更是必须
+       先拉最新再改，否则这份旧快照写回去会把别人刚发的东西整块抹掉。 */
+    var SOC_W = {
+      hb: 1, req_send: 1, req_act: 1, unfriend: 1, msg_send: 1, duel_create: 1, fb_add: 1,
+      friends_list: 1, msg_list: 1, duel_list: 1, duel_get: 1, news_list: 1, fb_mine: 1
+    };
+    return load(!!SOC_W[act]).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2541,7 +2576,13 @@ function cloud(){
     var aid = requireLogin(b);
     var act = String((b && b.p_action) || '');
     var arg = (b && b.p_arg) || {};
-    return load().then(function () {
+    /* 礼包同理：角标、礼物列表都是「别人刚送了没有」，必须看最新；
+       领取 / 赠送 / 群发是写，更要先看最新再落盘。 */
+    var GIFT_W = {
+      gift_take: 1, gift_send: 1, admin_pet_set: 1, gift_bulk: 1,
+      unread: 1, gift_list: 1, admin_bags: 1
+    };
+    return load(!!GIFT_W[act]).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2701,7 +2742,7 @@ function cloud(){
   H.wc_pet_grant = function (b) {
     var pw = String((b && b.p_admin) || '');
     var v = (b && b.p_val) || {};
-    return load().then(function () {
+    return load(true).then(function () {        /* 后台发宠物：改的是别人的记录，必须最新 */
       var g = adminOnly(pw);
       if (!g.ok) return { ok: true, data: { ok: false, msg: '无权限（要管理员口令，拿自己账号的密码改宠物没用）' } };
       var r = rec(String(v.aid || '').toUpperCase());
@@ -2751,7 +2792,7 @@ function cloud(){
     var pw = String((b && b.p_admin) || '');
     var act = String((b && b.p_action) || '');
     var v = (b && b.p_val) || {};
-    return load().then(function () {
+    return load(true).then(function () {
       var g = adminOnly(pw);
       if (!g.ok) return { ok: true, data: { ok: false, msg: '无权限（要管理员口令，拿自己账号的密码改仓库没用）' } };
       if (act === 'fb_list') {
@@ -2843,7 +2884,7 @@ function cloud(){
   H.wc_admin = function (b) {
     var pw = String((b && b.p_admin) || '');
     var act = String((b && b.p_action) || '');
-    return load().then(function () {
+    return load(true).then(function () {
       var g = adminOnly(pw);
       if (!g.ok) return { ok: true, data: { ok: false, msg: '无权限（要管理员口令，别拿自己账号的密码来删号）' } };
       var r = rec(String((b && b.p_aid) || '').toUpperCase());
@@ -2898,13 +2939,14 @@ function cloud(){
   function probe() {
     /* 本机模式也算「能存」——只是存这台设备。自检要如实反映，别报成失败。 */
     if (cfgProblem() && !cloudOnly()) return Promise.resolve({ ok: false, msg: cfgProblem(), step: '配置' });
-    return load().then(function () {
+    return load(true).then(function () {
       if (!_T) _T = { v: 1, t: {} };
       if (!_T.t) _T.t = {};
       _T.t['__probe__'] = { aid: '__probe__', pw: '', nm: 'probe', ts: now() };
       return commit();
     }).then(function () {
-      return load();
+      /* 必须强制重拉：走 TTL 的话拿到的是刚写进内存的那份，等于自己验自己，验不出云端问题 */
+      return load(true);
     }).then(function () {
       var back = _T && _T.t && _T.t['__probe__'];
       var ok = !!back && Number(back.ts || 0) > 0;
@@ -3131,6 +3173,9 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
+
+
 async function rpc(fn, body){
   /* [2026-10-05] 优先走统一云层：Turso 主 / Supabase 备 / jsonbin / 本机兜底。
      它把 13 个 wc_* 全在浏览器里实现，云端只当一块会同步的硬盘（整张表读写），
