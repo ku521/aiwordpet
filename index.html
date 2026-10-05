@@ -2856,7 +2856,7 @@ function cloud(){
   function anonEnsure() {
     var cur = anonCurrent();
     if (cur) return cur;
-    var rec = { aid: anonGenAid(), pw: anonGenPw(), nm: '同学' + (100 + Math.floor(Math.random() * 900)), ts: Date.now() };
+    var rec = { aid: anonGenAid(), pw: anonGenPw(), nm: '游客', ts: Date.now() };
     var a = anonList(); a.push(rec); anonWrite(ANON_LIST, a);
     var st = anonState(); st.cur = rec.aid; anonWrite(ANON_ST, st);
     rec.created = true;
@@ -3194,7 +3194,7 @@ function ensureCloudProfile(aid){
   if(m[AID]&&USERS.some(x=>x.id===m[AID])) return m[AID];
   const hit=USERS.find(x=>x.cloud&&String(x.cloud.aid).toUpperCase()===AID);   /* 本机上次挂过这个号 */
   if(hit){ m[AID]=hit.id; raw.set('cloudUid',m); return hit.id; }
-  const u={id:'u'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),name:'同学',av:'🐣'};
+  const u={id:'u'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),name:'游客',av:'🐣'};
   USERS.push(u); m[AID]=u.id; raw.set('cloudUid',m); raw.set('users',USERS);
   return u.id;
 }
@@ -4438,7 +4438,7 @@ function saveAll(){
 function ensureUser(){
   if(USERS.length)return;
   const hasOld=localStorage.getItem('wc8_prog')||localStorage.getItem('wc8_stats')||localStorage.getItem('wc8_wrong');
-  const u={id:'u'+Date.now().toString(36),name:'同学',av:'🐣'};
+  const u={id:'u'+Date.now().toString(36),name:'游客',av:'🐣'};
   if(hasOld){                       // 迁移：命名空间前缀不同，逐个复制
     ['prog','stats','wrong','core','exp','hist','mastery','banks'].forEach(k=>{
       try{const v=localStorage.getItem('wc8_'+k);if(v)localStorage.setItem('wc8u_'+u.id+'_'+k,v)}catch(e){}
@@ -6359,30 +6359,45 @@ function anonCopy(txt){
     var ok=document.execCommand('copy'); document.body.removeChild(ta); return ok;
   }catch(e){ return false; }
 }
+/* 自动注册专用：生成「好听昵称」（形容词 + 名词），避开已被占用的。 */
+function anonNiceName(){
+  try{
+    var A=['快乐','阳光','勇敢','聪明','可爱','元气','闪亮','萌萌','酷酷','安静','机智','幸运','甜甜','暖暖','闪闪','迷你','超级','小','温柔','自由'];
+    var B=['小鹿','星星','小猫','兔子','狮子','海豚','云朵','月亮','太阳','饼干','糖果','草莓','布丁','风铃','泡泡','棉花糖','小熊','企鹅','考拉','松鼠','鲸鱼','柚子','栗子','年糕','团子'];
+    for(var t=0;t<8;t++){
+      var n=A[Math.floor(Math.random()*A.length)]+B[Math.floor(Math.random()*B.length)];
+      if(typeof nameClash!=='function' || !nameClash(n)) return n;
+    }
+    return A[Math.floor(Math.random()*A.length)]+B[Math.floor(Math.random()*B.length)];
+  }catch(e){ return '游客'; }
+}
 /* 走云端自己的注册接口，跟手动注册完全同一条路（含注册后那条「换档案」逻辑） */
 function anonAutoRegister(r){
   try{
     if(typeof rpc!=='function') return;
+    /* 这条路只可能从「用户手动点了我帮建个号」进来（anonBoot 入口已拦 cloudLink），
+       所以注册成功后【必然切到这个新云端账号】，并且把刚玩的游客进度一起带过去。
+       以前 success 里写了 if(cloudLink()) 就不换档 —— 本意是防「已登录被顶」，
+       但自动注册根本到不了已登录态，反而把正常切档挡掉了，导致一直停在游客号、
+       后续玩的进度也没存进新号。现在直接切 + 用本次捕获的游客进度覆盖新号。 */
+    var _nice = (typeof anonNiceName==='function')?anonNiceName():(r.nm||'游客');
     var cp=(typeof cloudPayload==='function')?(cloudPayload()||{}):{};
-    rpc('wc_register',{p_aid:r.aid,p_pw:r.pw,p_nm:r.nm,p_av:'🐣',
+    rpc('wc_register',{p_aid:r.aid,p_pw:r.pw,p_nm:_nice,p_av:'🐣',
       p_exp:cp.p_exp,p_prog:cp.p_prog,p_stats:cp.p_stats,p_hist:cp.p_hist,p_mastery:cp.p_mastery,
       p_banks:cp.p_banks,p_pin:(cp.p_pin||''),p_limcfg:cp.p_limcfg,p_wrong:cp.p_wrong,p_core:cp.p_core})
     .then(function(res){
       if(res&&res.ok&&res.data&&res.data.ok){
         try{ KVCloud.anon.markSync(); }catch(e){}
-        /* 2026-10-06 关键：这句以前是无脑换档案（_cloudEnter），
-           于是「已经登录的同学」答一道题就被自动注册的新号顶下去。
-           现在先判一下：正在用另一个云端账号 → 只建档、只提示，绝不换档。 */
-        if(cloudLink()){
-          var _nm=''; try{ _nm=(curUser()&&curUser().name)||''; }catch(e){}
-          toast('已建档：'+r.aid+' ☁️（你当前用的是「'+_nm+'」，没被顶掉；想用这个号去「本机账号」里切）');
-        }else{
-          try{ if(typeof _cloudEnter==='function') _cloudEnter(r.aid,r.pw,res.data.data); }catch(e){}
-          toast('已自动同步到云端：'+r.aid+' ☁️');
-        }
+        try{ KVCloud.anon.rename(r.aid,_nice,'🐣'); }catch(e){}   /* 本机清单也留一份好听昵称 */
+        /* 切档前抓最新游客进度（含注册等待期间可能又玩了几关），切过去后写进新号，保证不丢 */
+        var _cp2=(typeof cloudPayload==='function')?(cloudPayload()||{}):{};
+        var _data=Object.assign({},_cp2,{name:_nice,av:'🐣'});
+        try{ if(typeof _cloudEnter==='function') _cloudEnter(r.aid,r.pw,_data); }catch(e){ console.warn('[自动注册] 切档没成：',e); }
+        toast('已自动建号并登录：'+r.aid+'（'+_nice+'）☁️，接下来玩的进度都会存进这个号');
       }else{
         /* 上云失败不要紧：本机照样玩，立个补传标记，下次进来再试 */
         try{ KVCloud.anon.queue(true); }catch(e){}
+        toast('云端建档没成功，本机照样玩；稍后联网会自动补传');
       }
     }).catch(function(e){
       try{ KVCloud.anon.queue(true); }catch(e2){}
