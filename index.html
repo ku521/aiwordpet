@@ -1999,6 +1999,9 @@ function cloud(){
   var HEALTH = {};      /* name -> {ms, ok, fail, at} */
   var SLOW_MS = 2500;   /* 单次读超过 2.5 秒算「慢」，下次让位给快的 */
   var _active = '';     /* 本次会话实际在用的后端 */
+  /* [2026-10-06] 上一次读失败、现在用的是内存里的旧表时为 true。
+     前端据此提示「数据可能不是最新的」，而不是让人对着空白页猜。 */
+  var _stale = false;
 
   function tick() {
     return (typeof performance !== 'undefined' && performance && performance.now)
@@ -2171,10 +2174,28 @@ function cloud(){
   function load(force) {
     if (_T && !force && (now() - _TTS) < TABLE_TTL) return Promise.resolve(_T);
     var first = !_T;
+    /* [2026-10-06 修·实测发现的真问题] 原来读失败时是
+         `else { _T = { v: 1, t: {} }; _src = 'local'; }`
+       —— 直接把内存里**已有的整张表替换成空表**。后果：
+         · 好友页拿到空 players → 名单一个都不显示（用户报「整页加载不出来」）
+         · 本机 localStorage 又常被浏览器隐私策略拦
+           （控制台的 Tracking Prevention blocked access to storage），
+           连本机兜底都是空 → 真的什么都拿不到。
+       现在：**读失败时保留上一次成功的表**，只打 stale 标记，
+         让页面能继续显示（可能不是最新数据），而不是白屏。
+         真的一次都没成功过（_T 为空）才用空表。 */
+    var hadTable = !!(_T && _T.t && Object.keys(_T.t).length);
     return raceRead().then(function (pick) {
       var t;
-      if (pick.res && pick.res.data) { _T = norm(pick.res.data); _src = pick.n; }
+      if (pick.res && pick.res.data) { _T = norm(pick.res.data); _src = pick.n; _stale = false; }
+      else if (hadTable) {
+        /* 保留旧表，标记为「可能不是最新」 */
+        _stale = true;
+      }
       else { _T = { v: 1, t: {} }; _src = 'local'; }
+      /* [2026-10-06] 把 stale 标记同步给页面：好友页要据此提示用户
+         「显示的是上一次读到的数据」，否则他会把老名单当成新数据。 */
+      try { g.__kvStale = _stale; } catch (e) { }
       _TTS = now();
       t = _T;
       return (first ? mergeLocalOnly(t) : Promise.resolve(0)).then(function (added) {
@@ -3425,6 +3446,7 @@ function cloud(){
       jb: { on: !blank(KVCFG.jb.bin) && !blank(KVCFG.jb.key), bin: KVCFG.jb.bin || '' },
       np: { on: !blank(KVCFG.np.url), url: KVCFG.np.url || '' },
       warn: _kvWarn,
+      stale: !!_stale,
       accounts: (_T && _T.t) ? Object.keys(_T.t).length : null
     };
   }
@@ -3691,27 +3713,30 @@ function cloud(){
 
 
 
+
 async function rpc(fn, body){
-  /* [2026-10-05] 优先走统一云层：Turso 主 / Supabase 备 / jsonbin / 本机兜底。
-     它把 13 个 wc_* 全在浏览器里实现，云端只当一块会同步的硬盘（整张表读写），
-     **不依赖任何服务端函数** —— 之前「看不到在线 / 消息收不到 / 发宠物报错」
-     就是因为服务端那批函数没了，现在这条路不再受它影响。
-     后端之间会自动测速切换：谁快用谁，谁挂了自动让位。 */
+  /* [2026-10-06 删掉平台 SDK 回退] 原来这里是「统一云层 → 平台云开发 SDK → 本地代理」
+     三级回退。现在**只保留统一云层**（Turso 主 / Supabase 备 / 本机兜底），原因：
+       ① 云层把 13 个 wc_* 全在浏览器里实现，云端只当一块会同步的硬盘（整表读写），
+          不依赖任何服务端函数 —— 平台 SDK 那条路已经没有存在意义；
+       ② 平台会往页面注入第三方脚本（cdn.jsdelivr.net 的 workbuddy-cloud-sdk），
+          用户控制台里能看到它被「Tracking Prevention blocked access to storage」
+          拦掉、还在拉 jsdelivr 资源，纯属干扰；
+       ③ 更要命的是：KVCloud.rpc 只要**返回 falsy**（不抛错）就会掉进回退，
+          而 workbuddy.link 域上 cloudHosted() 判 false、本该立刻返回"没这条路"，
+          中间却先去 cloud() 里摸一把 window.WorkBuddyCloud，徒增变量与延时。
+     统一云层出问题时**如实报错**，不再静默换通道 —— 静默回退只会让
+     「拿到的到底是不是最新数据」变得不可知（这正是好友页空白的来源之一）。 */
   if(typeof KVCloud!=='undefined' && KVCloud && typeof KVCloud.rpc==='function'){
     try{
       const _r = await KVCloud.rpc(fn, body||{});
       if(_r) return _r;
-    }catch(e){ /* 云层也崩了就退回原来的通道 */ }
+      return {ok:false, msg:'云端没有返回结果，请稍后重试'};
+    }catch(e){
+      return {ok:false, msg:String((e&&e.message)||e)||'云端请求失败'};
+    }
   }
-  if(!cloudHosted()) return {ok:false, msg:'无法连接云端，请检查网络后重试'};
-  if(cloudViaProxy()) return rpcViaProxy(fn, body||{});
-  const c=cloud();
-  if(!c) return {ok:false, msg:'云端未连接（请联网后重试）'};
-  try{
-    const {data,error}=await c.database.rpc(fn, body||{});
-    if(error) return {ok:false, msg:(error.message||'云端错误')};
-    return {ok:true, data:data};
-  }catch(e){ return {ok:false, msg:String((e&&e.message)||e)}; }
+  return {ok:false, msg:'云层未就绪，请刷新页面重试'};
 }
 function curUser(){ return USERS.find(x=>x.id===UID)||null; }
 function cloudLink(){ const u=curUser(); return (u&&u.cloud)?u.cloud:null; }
@@ -8713,10 +8738,32 @@ async function loadFriends(){
   }
 }
 let frReq=[], _chatWith=null, _bowlIv=null;
-/* [2026-10-06] 好友页整页加载预算（毫秒）。云层单请求超时 12 秒，
-   但老路径会连发 4 个请求 —— 没有这道总闸就会累加成 48~60 秒。
-   8 秒：比单请求超时略长，保证正常网络下一次就够；弱网下到点必给重试框。 */
-const FR_DEADLINE=8000;
+/* [2026-10-06 调整 8→20 秒] 好友页整页加载预算（毫秒）。
+   为什么不是 8 秒：实测 Turso 单次读在这台机器上
+   最快 863ms / 中位 934ms / 最慢 3564ms，而真实用户网络更慢；
+   8 秒预算会把「本来能成功、只是慢」的加载提前掐掉，
+   结果就是**保护机制本身制造了"加载不出来"**。
+   20 秒的取舍：
+     · 仍然有上限，不会像改造前那样无限转圈、也没有任何提示；
+     · 足够覆盖弱网下的 1~2 次整表读；
+     · 真正的兜底是云层单请求 12 秒超时 + 看门狗的可点重试框。
+   注意：预算只用来「到点给提示」，**不会取消已发出的请求**。 */
+const FR_DEADLINE=20000;
+
+/* [2026-10-06] 好友页这次的数据是不是「读失败后用的旧表」。
+   云层读不到时会保留内存里上一次成功的整表（而不是清空），
+   这样页面至少能显示名单；代价是数据可能不是最新的 —— 用这个标记提示用户。 */
+let _frStale=false;
+function isCloudStale(){
+  /* 云层每次读之后都会把 window.__kvStale 更新好（true = 这次用的是旧表） */
+  try{ return !!(window.__kvStale||false); }catch(e){ return false; }
+}
+function frStaleBanner(){
+  if(!_frStale) return '';
+  return '<div style="margin:0 0 10px;padding:9px 11px;border-radius:11px;'
+    + 'background:#fff8e6;border:1px solid #ffe0a3;color:#8a6d1a;font-size:12px;line-height:1.6">'
+    + '⚠️ 网络不稳，这次显示的是<b>上一次读到的数据</b>，可能不是最新的。稍等会自动刷新。</div>';
+}
 const QUICK=['👍 加油','⚔️ 来一局','🎯 今天我领先啦','📚 一起背单词','💪 别放弃','🌙 早点休息','🏆 向你学习','🙌 谢谢你'];
 
 /* [2026-10-06 删] frCard 已随好友页重构废弃，全文件无调用 */
@@ -8749,12 +8796,12 @@ function frWatchStart(w){
            现在统一成只用「元素还在不在」判断（上面已判过一次，这里是兜底双保险）：
            人真的走了 w 会自动脱离文档；时序问题则完全不存在。 */
       if(w && !w.isConnected){ frStopWatch(); return; }
-      /* [2026-10-06] 6 秒还没出来就交给用户。
+      /* [2026-10-06] 10 秒还没出来就交给用户（只是提示，不是判失败）。
          更早是 3.5 秒 → 太短，网络稍慢就误报；又曾改成 6 秒 + 偷偷自动重试一次
          （等于让用户干等 12 秒才看到提示）。现在：6 秒到点直接给**可点的**重试框。 */
-      if(Date.now()-t0<=6000) return;
+      if(Date.now()-t0<=10000) return;
       frStopWatch();
-      frRetryBox(w,'加载慢了，可能是网络不太稳','已等 6 秒；点下面按钮立刻重试');
+      frRetryBox(w,'加载慢了，可能是网络不太稳','已等 10 秒；点下面按钮立刻重试');
       const b=$('#frRetry'); if(b) b.textContent='🔄 重新加载好友数据';
     }catch(e){ frStopWatch(); }
   },1200);
@@ -8800,7 +8847,7 @@ async function renderFriendPageInner(seq){
     const wb=$('#frWrap'); if(!wb)return true;
     frStopWatch();
     frRetryBox(wb,'好友数据没加载出来',
-      '已等 '+FR_DEADLINE+' 秒（'+((why||'网络')+' · '+why2)+'）；点下面按钮立刻重试');
+      '已等 '+FR_DEADLINE+' 秒还没好（'+((why||'网络')+' · '+why2)+'）；点下面按钮立刻重试');
     return true;
   };
   /* [2026-10-06 提速] 一次请求拿全：在线名单+好友+申请+挑战+礼物 合并接口。
@@ -8814,6 +8861,10 @@ async function renderFriendPageInner(seq){
     if(overBudget()){ if(budgetBox('等云端数据超时'))return; }
     const d=(fp&&fp.ok&&fp.data&&fp.data.ok)?(fp.data.data||null):null;
     if(d&&Array.isArray(d.players)){
+      /* [2026-10-06] 云层读失败时它会保留上一次成功的表（stale 标记），
+         所以这里 players 照样有内容 —— 但要告诉用户「可能不是最新的」，
+         否则他看到的老名单会以为是新数据。 */
+      _frStale=isCloudStale();
       const map={}; d.players.forEach(p=>{map[p.acc_id]=p});
       pm=map; _plMap=map; _plTs=Date.now(); notePresence(d.players);
       const so=d.social||{};
@@ -8872,7 +8923,7 @@ async function renderFriendPageInner(seq){
   const duels=Array.isArray(duelsRaw)?duelsRaw:[];
   const me=lk.aid;
   /* 礼物区包一层独立容器：轮询时只重画这一小块（frPatchGifts），不动整页 */
-  let h='<div id="frGifts">'+pmGiftHTML()+'</div>';
+  let h=frStaleBanner()+'<div id="frGifts">'+pmGiftHTML()+'</div>';
   /* 我的账号 */
   h+='<div class="chartWrap" style="margin-top:0"><div class="chartTit">🪪 我的账号 · 把这个 ID 给同学就能加你</div>'
     +'<div style="display:flex;align-items:center;gap:10px"><div style="flex:1;font-family:Consolas,Menlo,monospace;font-size:17px;font-weight:800;color:#1f2940;letter-spacing:1px" id="myAid">'+me+'</div>'
