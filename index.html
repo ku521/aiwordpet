@@ -1851,18 +1851,19 @@ function cloud(){
   var READERS = { ts: tsRead, sb: sbRead, jb: jbRead, np: npRead, local: localRead };
   var WRITERS = { ts: tsWrite, sb: sbWrite, jb: jbWrite, np: npWrite, local: localWrite };
 
-  /* 并发探测：谁先带着数据回来就用谁（快的赢，慢的被记下来）
+  /* 读取路由（2026-10-06 再修：多用户互相看不到 —— 根因在这）
+     之前是「云端后端之间并发竞速，谁快用谁」。致命点：Turso 与 Supabase 是**两个
+     互相独立、彼此没有实时同步的库**，谁快读谁 = 不同用户可能撞上不同库，
+     于是 A 写了 Turso、B 从 Supabase 读，B 永远看不到 A（在线/消息/礼包全断）。
+     这正好就是用户说的「数据端也两个地址、哪个快启用哪个 → 前端和后端口没串起来」。
 
-     [2026-10-06 修：好友在线不更新 / 消息收不到 / 礼包收不到 —— 就栽在这一句上]
-     本机（localStorage）绝不能参与竞速。它是同步返回的（0ms），必然赢过所有云端后端，
-     于是**每次读都拿到这台设备自己那份旧快照**：
-       ① 别人刚发的心跳、消息、礼包，本机一概看不见；
-       ② 更糟的是下一次写（存档 / 心跳 / 领礼包）会把这份旧快照整表覆盖回云端，
-          把别人的新数据一起抹掉 —— 表现就是「消息发出去了对方永远收不到」。
-     正确做法：**只有云端后端之间竞速**，本机退回到它该在的位置 ——
-     云端全挂或全空（第一次离线玩）时才兜底。 */
+     正确模型（贴合用户「Turso 主、Supabase 备」的意图）：
+       ★ 主库 Turso 是**唯一权威读源**——只要它回话（有数据或空表都算），
+         所有用户都读它，多用户天然一致，这才是「前后端串起来」；
+       ★ 只有 Turso 真·网络失败，才退到 Supabase（备库），再退其它，最后本机；
+       ★ 写仍广播到所有后端（见 commit），保证备库在故障时也是新数据。 */
   function raceRead() {
-    var names = backendOrder().filter(function (n) { return n !== 'local'; });
+    var cands = backendOrder().filter(function (n) { return n !== 'local'; });
     function localFallback() {
       return localRead().then(function (res) {
         _active = 'local';
@@ -1872,26 +1873,33 @@ function cloud(){
         return { n: 'local', res: null, ms: 0 };
       });
     }
-    if (!names.length) return localFallback();          /* 一个云端都没配：只能本机 */
-    var jobs = names.map(function (n) {
+    if (!cands.length) return localFallback();          /* 一个云端都没配：只能本机 */
+    /* 并行打所有后端，但**主库优先**：Turso 一回话就用它（不论快慢），
+       保证所有设备读的是同一份数据，多用户才能互相看见。 */
+    var jobs = cands.map(function (n) {
       var t0 = tick();
       return READERS[n]().then(function (res) {
-        var ms = tick() - t0;
-        markOk(n, ms);
-        return { n: n, res: res, ms: ms };
+        markOk(n, tick() - t0);
+        return { n: n, res: res, ms: tick() - t0 };
       }).catch(function (e) {
         markBad(n, e);
         return { n: n, res: null, err: String((e && e.message) || e) };
       });
     });
     return Promise.all(jobs).then(function (outs) {
-      var withData = outs.filter(function (o) { return o.res && o.res.data; });
-      if (withData.length) {
-        withData.sort(function (a, b) { return a.ms - b.ms; });
-        _active = withData[0].n;
-        return withData[0];
+      var ts = outs.find(function (o) { return o.n === 'ts'; });
+      /* 主库回话了就用主库（有数据或空表都算回话；空表说明还没人写，正常） */
+      if (ts && ts.res) { _active = 'ts'; return ts; }
+      /* 主库挂了 → 退到其它后端里最快带回数据的那个（Supabase 优于 jsonbin 等） */
+      var alt = outs.filter(function (o) { return o.n !== 'ts' && o.res && o.res.data; });
+      if (alt.length) {
+        alt.sort(function (a, b) { return a.ms - b.ms; });
+        _active = alt[0].n;
+        return alt[0];
       }
-      /* 云端全挂，或配了但全是空表 → 本机兜底（离线也能照常玩） */
+      /* 都没数据 → 用第一个没报错的（通常是刚初始化的空表），否则本机兜底 */
+      var anyOk = outs.find(function (o) { return o.res; });
+      if (anyOk) { _active = anyOk.n; return anyOk; }
       return localFallback();
     });
   }
@@ -2923,6 +2931,24 @@ function cloud(){
       if (act === 'ban' && r) { r.banned = !!b.p_val; touch(r); return save(r); }
       if (act === 'del' && r) { return del(r.aid); }
       if (act === 'exp_set' && r) { r.p_exp = Number(b.p_val) || 0; touch(r); return save(r); }
+      /* 后台改昵称（管理面板「修改昵称」按钮 → action='setname'）。
+         以前这里缺这个分支，点了永远提示「不支持的管理操作」，用户以为改昵称功能坏了。 */
+      if (act === 'setname' && r) {
+        var nm = String(b.p_val || '').trim();
+        if (!nm) return { ok: true, data: { ok: false, msg: '昵称不能为空' } };
+        if (nm.length > 12) return { ok: true, data: { ok: false, msg: '昵称最多 12 个字' } };
+        r.name = nm; touch(r); return save(r);
+      }
+      /* 后台改账号 ID（管理面板「修改账号 ID」按钮 → action='rename'）。
+         与管理员口令校验通过后，直接把记录换到新 key 上（跟 wc_change_aid 同款逻辑，
+         只是不需要对方原密码）。 */
+      if (act === 'rename' && r) {
+        var na = String(b.p_val || '').trim().toUpperCase();
+        if (!/^[A-Z0-9]{4,16}$/.test(na)) return { ok: true, data: { ok: false, msg: '账号 ID 只能是 4-16 位字母或数字' } };
+        if (rec(na)) return { ok: true, data: { ok: false, msg: '这个新 ID 已被占用' } };
+        if (_T.t[r.aid]) delete _T.t[r.aid];
+        r.aid = na; touch(r); return save(r);
+      }
       return { ok: true, data: { ok: false, msg: '不支持的管理操作：' + act } };
     }).then(function (x) {
       /* [v20] save() / del() 兑现出来的是整张表（truthy 但没有 ok 字段），
@@ -3199,6 +3225,8 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
+
 
 
 
