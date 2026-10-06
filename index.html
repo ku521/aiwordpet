@@ -2283,6 +2283,25 @@ function cloud(){
     return q;
   }
   function isFr(r, aid) { return socOf(r).fr.indexOf(aid) >= 0; }
+  /* [2026-10-06 新增] 未读私信计数（底部「好友」tab 红点要用）：
+     消息只存在发送方的记录里（soc.msg，to=接收方），所以「我有没有新消息」
+     必须去每个好友的记录里翻 to===我 的消息，再跟我的「已读游标」
+     soc.rd[好友ID]（我在聊天窗口里看到的最后一条消息时间戳）比对。
+     游标在 msg_list（打开聊天窗口）时推进 —— 看过就算已读。 */
+  function msgUnreadOf(r) {
+    var s = socOf(r);
+    if (!s.rd || typeof s.rd !== 'object') s.rd = {};
+    var n = 0;
+    (s.fr || []).forEach(function (fa) {
+      var fo = rec(fa);
+      if (!fo || !fo.soc || !Array.isArray(fo.soc.msg)) return;
+      var seen = Number(s.rd[fa]) || 0;
+      fo.soc.msg.forEach(function (m) {
+        if (m && m.to === r.aid && (Number(m.ts_ms) || 0) > seen) n++;
+      });
+    });
+    return n;
+  }
   /* 一次改两条记录（加好友 / 发邀请都要动双方） */
   function saveBoth(a, b) {
     if (!_T) _T = { v: 1, t: {} };
@@ -2404,7 +2423,14 @@ function cloud(){
           c.a = (m.to === o.aid) ? me : o.aid;
           return c;
         });
-        return {
+        /* [2026-10-06 新增] 已读游标：打开聊天窗口 = 这位好友的消息全部看过。
+           记下最新一条的时间戳，未读红点据此清零（消息仍只存发送方那份，结构不变）。
+           msg_list 本来就在 SOC_W 里（读前强制拉最新），这里顺手落盘不会覆盖别人刚写的数据。 */
+        var sRd = socOf(r);
+        if (!sRd.rd || typeof sRd.rd !== 'object') sRd.rd = {};
+        var maxTs = 0;
+        list.forEach(function (m) { var t = Number(m.ts_ms) || 0; if (t > maxTs) maxTs = t; });
+        var resp = {
           ok: true, data: {
             ok: true, data: {
               msgs: list.slice(-100),
@@ -2414,6 +2440,12 @@ function cloud(){
             }
           }
         };
+        if (maxTs > (Number(sRd.rd[o.aid]) || 0)) {
+          sRd.rd[o.aid] = maxTs;
+          touch(r);
+          return save(r).then(function () { return resp; });
+        }
+        return resp;
       }
       if (act === 'msg_send') {
         if (!o) return { ok: true, data: { ok: false, msg: '对方账号不存在' } };
@@ -2641,11 +2673,15 @@ function cloud(){
       /* 脏数据净化：历史遗留条目（无 kind）作废、缺 id 的补 id，改了就先落盘再继续 */
       if (giftMigrate(r)) return save(r).then(function () { return H.wc_gift(b); });
 
-      /* 底部红点：待领取礼物数 + 待处理好友申请数 */
+      /* 底部红点：待领取礼物数 + 待处理好友申请数 + 未读私信数 */
       if (act === 'unread') {
         var box = giftBox(r).box.filter(function (g) { return g && !g.taken; });
         var reqs = (r.soc ? (r.soc.in || []).length : 0) + (r.soc ? (r.soc.out || []).length : 0);
-        return { ok: true, data: { gifts: box.length, reqs: reqs } };
+        /* [2026-10-06 新增] msgs：好友发来的、还没点开聊天窗口看过的消息数。
+           以前这里只算礼物和申请，同学发来私信红点永远不亮。 */
+        var msgN = 0;
+        try { msgN = msgUnreadOf(r); } catch (e) { msgN = 0; }
+        return { ok: true, data: { gifts: box.length, reqs: reqs, msgs: msgN } };
       }
 
       /* 我收到的礼物 */
@@ -2897,12 +2933,15 @@ function cloud(){
           return { id: Number(g.id), kind: g.kind, n: g.n, a: g.a, ts: g.ts, body: g.body || '' };
         });
       var reqs = (r.soc ? (r.soc.in || []).length : 0) + (r.soc ? (r.soc.out || []).length : 0);
+      /* [2026-10-06 新增] 未读私信数（与 unread 动作同款口径），好友页合并读时一并带回 */
+      var fpMsgN = 0;
+      try { fpMsgN = msgUnreadOf(r); } catch (e) { fpMsgN = 0; }
 
       return {
         ok: true, data: {
           ok: true, data: {
             players: players, social: social, duels: duels, gifts: gifts,
-            unread: { gifts: box.filter(function (g) { return g && !g.taken; }).length, reqs: reqs }
+            unread: { gifts: box.filter(function (g) { return g && !g.taken; }).length, reqs: reqs, msgs: fpMsgN }
           }
         }
       };
@@ -3318,6 +3357,7 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
 
 
 
@@ -3775,22 +3815,35 @@ function giftOwnNum(kind){
   return Math.max(0,Math.round(Number(items[G.k])||0));
 }
 /* ---------- 未读角标：底部「好友」tab 红点 ---------- */
-let _unread={gifts:0,reqs:0};
-function pmGiftBadgeSet(n){
-  _unread.gifts=Math.max(0,n||0);
+/* [2026-10-06 修] 以前红点只算「礼物+好友申请」，同学发来私信红点永远不亮；
+   现在 msgs（未读私信）也计入总数。渲染与赋值拆开：
+   pmGiftBadgeSet 只动礼物数（各处旧调用不用改），pmUnreadMerge 整体合并服务端结果。 */
+let _unread={gifts:0,reqs:0,msgs:0};
+function pmBadgeRender(){
   const tb=document.querySelector('.tb[data-tab="friend"]');
   if(!tb)return;
-  let b=tb.querySelector('.tbDot'); const total=_unread.gifts+_unread.reqs;
+  let b=tb.querySelector('.tbDot'); const total=_unread.gifts+_unread.reqs+_unread.msgs;
   if(total>0){
     if(!b){ b=document.createElement('i'); b.className='tbDot'; tb.appendChild(b); }
     b.textContent=total>99?'99+':String(total);
     b.style.display='block';
   }else if(b){ b.style.display='none'; }
 }
+function pmGiftBadgeSet(n){
+  _unread.gifts=Math.max(0,n||0);
+  pmBadgeRender();
+}
+function pmUnreadMerge(d){
+  if(!d||typeof d!=='object')return;
+  _unread.gifts=Math.max(0,Number(d.gifts)||0);
+  _unread.reqs=Math.max(0,Number(d.reqs)||0);
+  _unread.msgs=Math.max(0,Number(d.msgs)||0);
+  pmBadgeRender();
+}
 async function pmGiftPollUnread(){
   if(!cloudLink())return;
   const r=await giftApi('unread');
-  if(r.ok&&r.data){ _unread=r.data; pmGiftBadgeSet(_unread.gifts); }
+  if(r.ok&&r.data){ pmUnreadMerge(r.data); }
 }
 /* ---------- 打开「我的背包」选择要送的东西 ---------- */
 function openGiftSend(toAid,toName){
@@ -7926,7 +7979,7 @@ async function presencePing(){
     改成 5 分钟一拍后降到 24 次/小时/人，省掉 83%。
     注：presence 轮询（wc_players）不在这一档里——它只是「读」，不写库、不算配额，
     所以 2026-10-05 单独给它缩到 20 秒（好友页）/ 45 秒（后台），只读不心疼。 */
-let _hbTimer=null, _hbPresTimer=null;
+let _hbTimer=null, _hbPresTimer=null, _hbBadgeTimer=null;
 function _hbBeat(){
   try{
     if(!cloudLink()){ heartbeatStop(); return; }   /* 没登云端账号就别空转 */
@@ -7943,10 +7996,17 @@ function heartbeatStart(){
   /* 顺带看谁上线/下线：也是纯读（wc_players），2026-10-05 从 3 分钟缩到 45 秒，
      和好友页那个 20 秒的轮询共用同一个节流闸，谁先到谁打，不会重复。 */
   _hbPresTimer=setInterval(function(){ try{ if(!document.hidden) presencePing(); }catch(e){} },45000);
+  /* [2026-10-06 新增] 未读角标全局轮询：以前角标只在好友页内刷新，人一走到别的页
+     就没人管红点了 —— 同学发来私信，底部「好友」tab 永远不亮。
+     现在只要登录着，无论停在哪个页都 20 秒探一次（纯读 unread，不写库不占配额）。 */
+  if(_hbBadgeTimer) clearInterval(_hbBadgeTimer);
+  _hbBadgeTimer=setInterval(function(){ try{ if(!document.hidden&&cloudLink()) pmGiftPollUnread(); }catch(e){} },20000);
+  try{ pmGiftPollUnread(); }catch(e){}             /* 启动心跳顺手先刷一次角标 */
 }
 function heartbeatStop(){
   if(_hbTimer){ clearInterval(_hbTimer); _hbTimer=null; }
   if(_hbPresTimer){ clearInterval(_hbPresTimer); _hbPresTimer=null; }
+  if(_hbBadgeTimer){ clearInterval(_hbBadgeTimer); _hbBadgeTimer=null; }
 }
 /* 从别的 App 切回来、或手机回到前台：立刻踩一脚 + 立刻看一次，别等下一个轮询 */
 try{ document.addEventListener('visibilitychange',function(){
@@ -7955,6 +8015,7 @@ try{ document.addEventListener('visibilitychange',function(){
       _hbBeat();
       _presLast=0;              /* 回到前台要立刻看一眼，别被 20 秒的节流闸挡住 */
       presencePing();
+      try{ pmGiftPollUnread(); }catch(e){}   /* 顺手刷一次未读红点，别等下一个 20 秒 */
     }
   }catch(e){}
 }); }catch(e){}
@@ -8064,6 +8125,7 @@ async function renderFriendPageInner(seq){
       frReq=Array.isArray(so.in)?so.in:[];
       _friendLoaded=true;
       if(Array.isArray(d.gifts)){ _giftList=d.gifts; _pmGiftSig=d.gifts.map(g=>g.id).join(','); pmGiftBadgeSet(_giftList.length); }
+      if(d.unread){ try{ pmUnreadMerge(d.unread); }catch(e){} }   /* 合并接口带回的未读（含私信数）直接喂给红点 */
       dr={ok:true,data:{ok:true,data:Array.isArray(d.duels)?d.duels:[]}};
     }
   }catch(e){}
@@ -8243,6 +8305,9 @@ async function frRenderChat(){
     +'<div style="font-size:10.5px;color:#a7b1c6;margin-top:6px">消息 7 天后自动清除；不文明用语会被管理员禁用账号。</div>'
     +'<button class="bigBtn ghost" id="chatDel" style="margin-top:10px">解除好友关系</button>';
   w.innerHTML=h;
+  /* [2026-10-06 新增] 看过聊天 = 已读（服务端 msg_list 已推进游标），
+     这里立刻刷新一次底部红点，让「好友」tab 上的未读数马上掉下来，不用等下个轮询。 */
+  try{ pmGiftPollUnread(); }catch(e){}
   $('#chatBack').onclick=()=>{_chatWith=null;renderFriendPage().catch(function(){});};
   $('#chatSend').onclick=async()=>{ await frSend('t') };
   $('#chatDel').onclick=async()=>{ if(!confirm('确定解除与该同学的好友关系？'))return; const rr=await soci('unfriend',{aid:_chatWith}); toast((rr.data&&rr.data.msg)||''); _chatWith=null; await loadFriends(); renderFriendPage().catch(function(){}); };
