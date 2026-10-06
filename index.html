@@ -2120,8 +2120,12 @@ function cloud(){
       var out = list().map(function (r) {
         return {
           acc_id: r.aid, name: r.name, av: r.av, on: online(r),
+          /* [2026-10-06 修] 前端 presence 判定只认 seen_ago / updated_at（老 Supabase 版遗留字段名），
+             这里以前只回 on/ts/updated → 前端永远判「离线」（用户报的「看不到双方在线」）。
+             on 是服务端算好的结论，seen_ago/updated_at 是前端兜底链路要的字段名，都给上。 */
+          seen_ago: Math.max(0, Math.round((now() - Number(r.hb || 0)) / 1000)),
           ts: r.hb || 0, hidden: !!r.p_hidden, exp: Number(r.p_exp) || 0,
-          created: r.created || '', updated: r.updated || ''
+          created: r.created || '', updated: r.updated || '', updated_at: r.updated || ''
         };
       }).filter(function (x) { return !x.hidden; });
       return { ok: true, data: { ok: true, data: out } };
@@ -2389,6 +2393,17 @@ function cloud(){
           list = list.concat(o.soc.msg.filter(function (m) { return m && m.to === me; }));
         }
         list.sort(function (x, y) { return (x.ts_ms || 0) - (y.ts_ms || 0); });
+        /* [2026-10-06 修] 前端用 m.a === 我的aid 判断「这条是我发的」，
+           但这里以前原样返回存储记录（只有 to，没有 a）→ m.a 永远是 undefined，
+           两台设备上**所有消息都显示成对方发的**（用户报的「双方消息合并到一个人头上」）。
+           读出时补发送者 a：我记录里的(to=对方)是我发的，对方记录里的(to=我)是对方发的。
+           只在返回时标注、不改存储结构，历史消息一并修好。 */
+        list = list.map(function (m) {
+          var c = {}, k;
+          for (k in m) c[k] = m[k];
+          c.a = (m.to === o.aid) ? me : o.aid;
+          return c;
+        });
         return {
           ok: true, data: {
             ok: true, data: {
@@ -2843,12 +2858,13 @@ function cloud(){
       if (giftMigrate(r)) return save(r).then(function () { return H.wc_friend_page(b); });
       var me = aid;
 
-      /* ① 全班名单 + 在线状态（与 wc_players 完全同款） */
+      /* ① 全班名单 + 在线状态（与 wc_players 完全同款，含 seen_ago/updated_at 兜底字段） */
       var players = list().map(function (rr) {
         return {
           acc_id: rr.aid, name: rr.name, av: rr.av, on: online(rr),
+          seen_ago: Math.max(0, Math.round((now() - Number(rr.hb || 0)) / 1000)),
           ts: rr.hb || 0, hidden: !!rr.p_hidden, exp: Number(rr.p_exp) || 0,
-          created: rr.created || '', updated: rr.updated || ''
+          created: rr.created || '', updated: rr.updated || '', updated_at: rr.updated || ''
         };
       }).filter(function (x) { return !x.hidden; });
 
@@ -3302,6 +3318,7 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
 
 
 
@@ -7811,7 +7828,11 @@ function notePresence(list){
     /* updated_at 兜底：对方最近 5 分钟内存过档（正在玩）= 在线。服务端若未回 seen_ago 时用它。 */
     let _upd=null;
     if(x.updated_at){ try{ const _dt=Date.parse(x.updated_at); if(!isNaN(_dt)) _upd=Math.round((Date.now()-_dt)/1000); }catch(e){} }
-    const live=(_raw!=null && !isNaN(_raw) && _raw<=_PRES_SEEN_SEC)
+    /* [2026-10-06 修] 服务端 wc_players/wc_friend_page 现在直接给 on（拿对方心跳现算的结论），
+       以前这里只认 seen_ago/updated_at 两个老字段名，而云端层只回 on/ts/updated
+       → live 永远 false → 所有人永远显示离线。现在 on 优先，老字段继续兜底。 */
+    const live=(x.on===true)
+      || (_raw!=null && !isNaN(_raw) && _raw<=_PRES_SEEN_SEC)
       || (_upd!=null && !isNaN(_upd) && _upd<=_PRES_SEEN_SEC);
     if(!p){ _pres[x.acc_id]={fp:fp, on:live, t:live?now:0}; dirty=true; return; }   // 第一次见到，没有「在线」信息可推断
     if(live){ p.fp=fp; p.on=true; p.t=now; dirty=true; }                            // 5 分钟内有报到 → 在线（刷新时间，防止误杀）
@@ -7828,6 +7849,9 @@ function _isToday(s){
 function presOf(x){
   const aid=x&&x.acc_id; if(!aid)return 'off';
   if(aid===(cloudLink()||{}).aid)return 'me';
+  /* [2026-10-06 修] 服务端结论优先：wc_players/wc_friend_page 的 on 是拿对方心跳现算的，
+     以前这里从不读它，只认 seen_ago/updated_at（云端层没给过）→ 永远离线。 */
+  if(x&&x.on===true)return 'on';
   const _raw=(x&&x.seen_ago);
   if(_raw!=null&&_raw!==''&&!isNaN(Number(_raw))&&Number(_raw)<=_PRES_SEEN_SEC)
     return 'on';                                          // ① 服务端心跳：5 分钟内报过到 = 在线（挂页面也算）
