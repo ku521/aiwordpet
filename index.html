@@ -1,6 +1,70 @@
 ﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<script>
+/* ---------- [2026-10-06 新增] 国内快速通道：GitHub 版太慢时，一键切到国内站 ----------
+ *
+ * 为什么需要（实测数据，2026-10-06 在这台机器上量了三轮）：
+ *   GitHub Pages（境外）完整下载 3.5MB：**64~68 秒**
+ *   workbuddy（国内 CDN）      完整下载 3.5MB：**0.6 秒（约 5.5 MB/s）**
+ * 相差约 100 倍。GitHub 版虽然留着（对外分享、备用、万一 workbuddy 抽风都能开），
+ * 但在国内当主力入口是不合适的 —— 老师/同学扫码后干等一分钟还没打开。
+ *
+ * 为什么不做「自动跳转」而是「给一个按钮」：
+ *   自动跳转风险太大（测速误判会把人送去打不开的地址、正在玩的时候被弹走、
+ *   微信内置浏览器对 location.replace 行为又不一致）。
+ *   所以做成**顶部队列里的一个常驻小条**：只在 GitHub 这个慢站显示，
+ *   workbuddy 站完全不显示，不打扰人；点一下才跳。
+ *
+ * 判定「慢站」用 hostname，不靠测速：一是省掉一次额外请求，
+ * 二是 hostname 是确定性的（Github Pages 永远是境外那个域名）。
+ */
+(function(){
+  try{
+    var h=(location.hostname||'').toLowerCase();
+    /* 只在 GitHub Pages 上显示；workbuddy 站、以及任何别的镜像都不显示 */
+    if(h.indexOf('github.io')<0) return;
+    var FAST='https://www.workbuddy.link/p/ZofjWD3mbOhNZhMdqJoVsh';
+    if(location.protocol==='file:') return;      /* 本地调试不弹 */
+    function show(){
+      if(document.getElementById('wbFastBar')) return;
+      var bar=document.createElement('div');
+      bar.id='wbFastBar';
+      bar.setAttribute('style',''+
+        'position:fixed;left:0;right:0;top:0;z-index:99999;'+
+        'background:linear-gradient(90deg,#0f172a,#1e3a5f);color:#fff;'+
+        'padding:9px 12px;font:600 13px/1.5 "Microsoft YaHei",sans-serif;'+
+        'display:flex;align-items:center;gap:10px;box-shadow:0 2px 10px rgba(0,0,0,.28)');
+      var t=document.createElement('span');
+      t.style.flex='1';
+      t.innerHTML='\u26F1\uFE0F \u6b64\u5730\u5740\u662f\u5883\u5916\u7ad9\uff0c\u52a0\u8f7d\u7ea6 1 \u5206\u949f\u3002';
+      var b=document.createElement('button');
+      b.textContent='\u56fd\u5185\u5feb\u901f\u6253\u5f00 \u2192';
+      b.setAttribute('style',''+
+        'flex:none;background:#4f6ef7;color:#fff;border:0;border-radius:9px;'+
+        'padding:8px 13px;font:700 13px/1 "Microsoft YaHei",sans-serif;cursor:pointer;white-space:nowrap');
+      b.onclick=function(){ location.href=FAST; };
+      var x=document.createElement('button');
+      x.textContent='\u2715';
+      x.setAttribute('style',''+
+        'flex:none;background:transparent;color:rgba(255,255,255,.7);border:0;'+
+        'font-size:15px;cursor:pointer;padding:4px 2px');
+      /* 关闭只隐藏不写存储：下次进来还想看到提示（境外真的慢） */
+      x.onclick=function(){ bar.remove(); };
+      bar.appendChild(t); bar.appendChild(b); bar.appendChild(x);
+      document.body.appendChild(bar);
+      /* 内容整体下移，避免盖住顶部导航 */
+      try{
+        var sp=document.createElement('div');
+        sp.style.height=(bar.offsetHeight||38)+'px';
+        document.body.insertBefore(sp, bar);
+      }catch(e){}
+    }
+    if(document.body) show();
+    else document.addEventListener('DOMContentLoaded', show);
+  }catch(e){}
+})();
+</script>
 <script>if((location.hostname||'').indexOf('studyen')>=0){location.replace('https://studyabc.app.workbuddy.host/');}</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
@@ -399,8 +463,7 @@ input{font-family:inherit}
 .modalMask .bigBtn{width:100%}
 
 /* [2026-10-06 新增] 院子里的副宠物：与房子前那只同款探头动画，位置在房子左侧草地上，尺寸略大一点好区分；没有第二只宠物时容器是空的（不显示） */
-.pmYardPet{position:absolute;right:23%;bottom:15%;width:30px;height:30px;line-height:0;z-index:2;pointer-events:none;transform-origin:50% 100%;animation:pmHousePeek 4.1s ease-in-out infinite}
-.pmYardPet img{width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 2px 2px rgba(0,0,0,.26))}
+
 </style>
 <script defer src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"></script>
 <script>window.TTS_MAP={"accident":"b3fdc740","account":"1cbdb112","achievement":"b68aacce","act":"0b885cbd","action":"f1644d03","activity":"dbaf6a92","address":"1f2653eb","advantage":"c49eb790","afraid":"f1995aec","a great deal":"81f6908f","agreement":"5e29447d","ahead":"0f150af8","airline":"2bca3c29","allow":"0f175c24","already":"32c5bc27","although":"9065cf81","a.m.":"7c93122f","among":"0f17f517","another":"37421b76","anyone":"f22e31cf","anything":"36d93167","anytime":"37f715bc","anyway":"f22e523e","anywhere":"370f6a68","a piece of cake":"a888d215","app":"0b885e66","argue":"0f1a91d9","around":"f271318e","artificial":"3322e27d","as":"00597739","ash":"0b885ec1","ashamed":"4262e518","athlete":"44bdf5cc","avoid":"0f1ce3d8","aware":"0f1d35d5","away":"7c944777","basic":"0f238967","bathroom":"2de894c1","be drawn to":"9cb174eb","bedroom":"6e75e34d","be glued to sth":"292a636f","behave":"f3d6f0f0","behaviour":"f038a42a","belt":"7c9488ac","birthmark":"ce5cf9a9","bleed":"0f295581","blind":"0f2967ae","block":"0f297fd0","blow sb away":"430e2c60","brain":"0f2c8f51","brave":"0f2c90f5","British":"eddcd59a","build":"0f2e56d5","careless":"15465a97","cash":"7c9504e4","cause":"0f35abb6","century":"bc2647cf","charge":"f65ed2cf","cheat":"0f393c0a","check":"0f393c43","cheese":"f660ce92","citizen":"c5e188bb","clear":"0f3b6d8c","clear sb's throat":"c7dcfc8d","click":"0f3b7ecb","climax":"f6ab81e3","coach":"0f3d01e3","common":"f6e3feae","complete":"4012ef9e","condition":"733efbac","congratulations":"4d661782","convenient":"3af5571e","cost":"7c95407e","course":"f6e87776","cover":"0f3d5b84","creative":"134d6598","crowded":"da8ccb8d","curiosity":"3cc8be70","cyberbullying":"6a3b0000","daylight":"1259595b","delivery":"27c00c69","detector":"3a16c39f","development":"07c763c8","difference":"52a92470","digital":"11f06ce3","disaster":"6b6af0c4","discuss":"12c64f43","divide":"f8d1713a","dividing line":"10e3697b","double":"f93d5b20","doubt":"0f4f6f63","download":"438451dd","drift":"0f50e1fe","drive":"0f50e3ff","during":"f9a8670e","education":"4d5574a1","effect":"fae77932","electricity":"82f43086","encouraging":"019214b7","enemy":"0f60b8e3","erupt":"0f632ed5","eruption":"1233081b","even":"7c967533","ever":"7c967537","everyday":"20f048ee","excellent":"5e4ebb49","except":"fc2b8ece","explain":"828c3cf6","exploration":"81b1b2fa","fail":"7c96a8c1","fair":"7c96a8c7","fashion":"9a140e0d","fear":"7c96b8c3","fix":"0b8872cc","flood":"0f71e359","flowerpot":"84f1b3c7","fool":"7c96e515","forever":"baa8bf3e","forward":"bab2465a","friendship":"fef22cd1","gate":"7c973686","generation":"bf1313b1","get in touch with":"0f1f099b","giant":"0f821b18","glad":"7c9762dd","glue":"7c976572","government":"aee57b8a","grade":"0f870928","guess":"0f88c14c","hate":"7c97c2e7","heat":"7c97d187","height":"01d688de","heroine":"3d4ee80f","herself":"3d51084e","hole":"7c97fd6d","honesty":"5454cbef","honour":"028e5f80","hook":"7c97fdd6","hurricane":"97bfe526","ID":"005973f2","I guess":"4949c5b5","imaginative":"22ea75f3","impossible":"48ea829c","improve":"9ccff887","inside":"04d411c1","instead":"9f5c562d","instead of":"e11dd9e2","into":"7c98869f","introduction":"08f58667","invent":"04d5a739","invention":"ac6955ff","inventor":"90dc683a","iron":"7c9896fd","jeans":"0fb63316","just":"7c9930ab","kick":"7c9987e7","kilogram":"d1da5ffb","knock":"0fcd751b","knock down":"24f5abf3","lane":"7c99f3a5","later":"0fd8823d","lawyer":"0aeac2d9","lend":"7c9a04a8","lend (sb) a hand":"7dfd8b0a","lightning":"f154b3c9","lightning rod":"30bef00e","limit":"0fdcc804","lively":"0b7aa65a","lost":"7c9a2fe7","machine":"b3ca2f1a","mess":"7c9a91bd","message":"be463eea","million":"c7188259","mobile":"0e317b5d","more":"7c9abc18","narrow":"0f9239be","neighbour":"c005f308","neighbourhood":"68932552","netizen":"0b4d8282","noise":"10043383","nor":"0b889594","note":"7c9b48bb","nothing":"22a0453c","nowadays":"7d26c8ab","object":"11f4defc","offer":"10114e17","offline":"59a0eec8","Olympic":"c9b0c582","Olympics":"ffc97635","once":"7c9bceaa","one after another":"6b0ec4aa","online":"12cf302a","opinion":"712be781","opposite":"a7146ff8","orchestra":"68250d50","order":"1017da21","ourselves":"c9390a6d","outside":"7d9f7ca2","oven":"7c9bf0fd","own":"0b889ad9","packet":"1434323d","pain":"7c9c248d","paint":"1020b6a1","pass":"7c9c25dc","passenger":"158bef8d","passionately":"bf16ffe1","passport":"17f305a1","password":"17f6dc38","past":"7c9c25dd","pay":"0b889c4f","payment":"9c49ad63","perhaps":"a51cd5b8","person":"1484f13c","personal":"49863d29","picnic":"14c5037b","pioneer":"ae3e8897","p.m.":"7c9b4bde","poem":"7c9c5f96","possible":"4d9e4966","pound":"102896eb","priceless":"9ed1096f","printer":"c2d0a309","private":"c2d4b720","progress":"2a64343a","quality":"1638500e","quickly":"16c42c27","quite":"103dc76d","railway":"351c5d5e","rainstorm":"f2156be4","reach":"1046f5a8","reaction":"f943569a","real":"7c9d4d49","recently":"fe0ebd0b","reduce":"19279c1d","relative":"12c7e561","report":"192e1921","respect":"3f27da1b","responsibility":"83e64be5","return":"19306425","ride":"7c9d5ea9","risk":"7c9d609e","risky":"104974d7","role":"7c9d7937","row":"0b88a69d","rule":"7c9d92bd","same":"7c9dca2b","sand":"7c9dca4b","satisfied":"a9a0e581","scared":"1b56e217","search":"1b7b12db","seat":"7c9dd9b2","seat belt":"b7de4239","second":"1b7c2041","selfish":"8b9e0293","sense":"10594783","service":"8c135996","shadow":"1bb1226b","shared bike":"1b4a3837","shock":"105aeedd","shocking":"ed172afb","shopkeeper":"77f5cddb","shout":"105af138","shower":"1bb91f3d","shut":"7c9de909","sign":"7c9deb76","signal":"1bc6ade3","silver":"1bc98e5a","the silver screen":"83728d5b","similar":"95066d36","since":"105b76f7","slim":"7c9df87a","smartphone":"8285f546","smelly":"1c0df01b","smoke":"105dadc4","society":"a25050a5","solve":"105ebb2e","special":"a4c66e86","spread":"1c4b3b44","station":"addc0347","step":"7c9e1a01","stick":"106169e3","stick to":"7ad1da86","still":"10616b0d","straight":"8fac2aeb","strange":"af054cd9","stranger":"8faee86b","strawberry":"4baeb17a","stressed":"8ffa3b52","succeed":"b04bf821","such":"7c9e1df8","suggestion":"3e73418d","superman":"d8498070","suppose":"b13e83f4","survivor":"de22aaf5","system":"1ceee48a","talent":"1d8dabcd","teach":"106b26aa","technology":"ab5b6d01","terrible":"fa77fc3e","test":"7c9e6865","theirs":"1e089234","therefore":"2541cb29","thick":"106cedd8","thing":"106cef3f","3-D":"0b8791e9","throat":"1e0fca77","ticket":"1e1998c9","torch":"1070eac5","trouble":"f729b402","true":"7c9e9fe5","truly":"10729de5","trust":"10729ec7","tsunami":"f9e794e6","uncomfortable":"3d792b16","unit":"7c9f19c5","until":"10828031","urgent":"2113b71a","value":"108d5742","via":"0b88b6c5","victim":"22c410d1","video":"1091963c","volcanic":"c5af71d4","volcano":"89de8757","wallet":"248d424e","warn":"7c9ffc5d","weekday":"bf0af06f","weigh":"10a192b9","whenever":"878ee1a9","while":"10a3387e","wizard":"25258676","would":"10a74230","wound":"10a74272","yet":"0b88c317","youngster":"a7f76175","zero":"7ca1b285","be":"0059774c","was/were":"88f50192","been":"7c9487bf","go":"005977fb","went":"7ca00ce3","gone":"7c97714e","do":"00597798","did":"0b886a36","done":"7c95cc2b","have":"7c97c329","had":"0b887a32","make":"7c9a7fa3","made":"7c9a7ebc","take":"7c9e564a","took":"7c9e9262","taken":"10691ff8","see":"0b88a982","saw":"0b88a910","seen":"7c9dda30","come":"7c953fa9","came":"7c95041b","get":"0b887685","got":"0b8877cf","give":"7c9758d0","gave":"7c9736c8","given":"0f82733e","find":"7c96cb66","found":"0f73a1e1","tell":"7c9e6776","told":"7c9e91f8","learn":"0fda6497","learnt":"0b26f7eb","shake":"105ab451","shook":"105af069","shaken":"1bb13edf","break":"0f2c9f4a","broke":"0f2ccb18","broken":"f4c62e86","bring":"0f2cb1f7","brought":"8d918340","built":"0f2e56e5","buy":"0b886355","bought":"f4931eae","catch":"0f35a568","caught":"f5eaf041","choose":"f66674e6","chose":"0f3968d7","chosen":"f6668425","cut":"0b886791","draw":"7c95d753","drew":"7c95d7d7","drawn":"0f50c221","drove":"0f50fd85","driven":"f96d644d","fall":"7c96a924","fell":"7c96ba28","fallen":"fce58f97","feel":"7c96b941","felt":"7c96ba30","grow":"7c977e44","grew":"7c977cfa","grown":"0f874732","hear":"7c97d185","heard":"0f920289","hold":"7c97fd6c","held":"7c97d2e2","keep":"7c99772a","kept":"7c997899","lead":"7c9a02fb","led":"0b888bba","leave":"0fda6512","left":"7c9a03b0","let":"0b888bca","lose":"7c9a2fd8","mean":"7c9a8f66","meant":"0fec7c9a","meet":"7c9a8ff0","met":"0b88900b","paid":"7c9c2483","put":"0b889ede","read":"7c9d4d41","rise":"7c9d6098","rose":"7c9d7a1e","risen":"10497406","run":"0b88a75a","ran":"0b88a4c6","say":"0b88a912","said":"7c9dc9a6","send":"7c9ddb4f","sent":"7c9ddb5f","sit":"0b88aa15","sat":"0b88a90d","speak":"105f2719","spoke":"105f52e7","spoken":"1c49b035","spend":"105f28bf","spent":"105f28cf","stand":"1061493f","stood":"106184ee","taught":"1d92a2f2","think":"106cef43","thought":"dfd63288","wear":"7ca00b34","wore":"7ca037e2","worn":"7ca037eb","write":"10a8b550","wrote":"10a8ced6","written":"ddab9692","hold back":"1a85b7fd","search for":"b6425522","look away":"e3ba1fac","make history":"2918ec75","suppose sb  sth  to be":"4bf1ec22","turn sunny":"e3364fcb","argue over":"c80e9315","reach an agreement":"de9f386f","keep   in mind":"f825d709","here and there":"66845734","in return":"ee09543c","far away":"d5258090","build   out of":"aefc2e62","lend a hand":"a1eaf784","work on":"d748a5c5","come up with":"85eb1eaa","what's worse":"7d8f0443","blow sb  away":"a02fca40","be curious about":"bc1eaef1","by accident":"a9be60bb","on purpose":"52aa5870","give up on":"3532fd32","cost an arm and a leg":"50ab4af9","look forward to":"bdfce392","be glued to":"c0f57ec0","take up":"cf2fc1af","in order to":"93299bdb","so as to":"4f8646de","clear one's throat":"182c183a","look after":"5af5116c","in hot water":"335e788a","face to face":"55f0c5e6","natural disaster":"8277145b","from side to side":"0489d826","refuse to do":"6f0d9045","leave   behind":"9c229adc","come out of":"b8878336","move on":"d5c75df9","be thick with":"9a330cbb","face   with courage":"2cfa81f6","get away from":"d8df368b","break out":"07b2a822","after a while":"ece1c751","I haven’t finished my homework _____.":"0e12a4f2","Nothing is _____ as long as you try and stick to it.":"9a11d686","important":"09e5eac3","different":"fabf4ebc","She has just _____ a rose on her face.":"fab997b5","painted":"9b28f04a","painting":"00470c3f","paints":"14378b34","I have lived here _____ three years.":"1958d32f","for":"0b88738c","in":"0059783c","at":"0059773a","They have been friends _____ Grade 3.":"bff06de7","after":"0f143297","Spring never comes, _____ summer.":"cf245e7d","nor does":"6ce4fdbf","so does":"9d915192","does nor":"19b841df","They argued _____ the dividing line between their houses.":"6d5cdab4","over":"7c9bf101","with":"7ca01ea1","to":"005979a8","They couldn’t _____ an agreement.":"ae432bc1","arrive":"f272a4ae","get to":"ff863be8","He decided _____ his design online.":"0f8ac100","to post":"ea9224ae","posting":"bc893ac9","post":"7c9c616b","posts":"10288f3e","She enjoys _____ problems and fixing them.":"f58a3b10","to fix":"1e6159af","fixing":"fd7cdc8a","fixed":"0f706335","I look forward to _____ back to China.":"12566afb","going":"0f858759","to go":"106f8e7e","Technology is part of our _____ life.":"a2d21768","every day":"3ed4270e","everydays":"3ef96721","every day’s":"447e463a","It _____ me 300 yuan to build the arm.":"0bdc9c61","Mobile payment allows us _____ smartphones to pay.":"7ecb7c7f","to use":"1e619ab5","use":"0b88b3d2","using":"10850feb","used":"7c9f2e76","It makes me _____ happy.":"1874a550","to feel":"ea8c7c84","feeling":"a26d8adf","sing":"7c9dec56","sang":"7c9dca4e","to sing":"ea93af99","sung":"7c9e1f62","singing":"951761d4","I _____ 20 yuan on this book.":"15e747b6","It _____ me 20 minutes to read it.":"726ed1e0","I went to a quiet area _____ read.":"980fe836","in order":"c8f7a358","so as":"105d753b","in order that":"03ffedc9","_____ pass the exam, he studied hard.":"9366cd7b","In order to":"e792f3bb","So as to":"c74baabe","So as":"0e1a651b","For to":"b33fdb6f","kicking":"2c809fc5","to kick":"ea8f4b2a","kicked":"091b2b10","to have":"ea8d866c","having":"01955102","Rules are there for us _____.":"f1bb6bb8","to follow":"c05687fb","following":"49d75236","follow":"fde2e7f8","followed":"023cd361","I _____ breakfast at 7 am yesterday.":"3166851e","was having":"f44eac6d","am having":"4648e430","We _____ talking when the teacher came in.":"1cb64b30","were":"7ca00d58","was":"0b88ba10","are":"0b885e9d","The ground _____ very hard when the earthquake happened.":"8a52c586","shaking":"91d92c2a","shakes":"1bb13ee4","My mother asked me to continue without her, but I refused _____ her behind.":"b7e6ebcf","to leave":"3c8890b5","leaving":"7008112b","— Where is Lucy? — She _____ the library.":"d7d1ffff","has gone to":"80cf580d","has been to":"e7faa4de","went to":"bfb19d86","goes to":"06bdfed6","_____ you ever _____ to Beijing?":"3690a324","Have; been":"4cfa7f3e","Have; gone":"4cfd68cd","Did; been":"6805800b","Have; be":"338d830b","— _____ have you known each other? — For five years.":"573f3aeb","How long":"66cd93a3","How often":"40b17bcf","How soon":"66d16a72","How far":"b58a006c","His grandpa _____ for ten years.":"ece646e1","has been dead":"d12e70a9","died":"7c95b17b","has died":"afffbcf7","was dead":"87db249e","Please remember _____ the door when you leave.":"3cccec08","to lock":"ea8ff111","locking":"8779d04c","lock":"7c9a2dce","locked":"0bdce6b7","He practices _____ English every morning.":"e7cc3368","speaking":"3d7149b7","to speak":"3d0d52bc","The teacher kept us _____ for ten minutes.":"15acdafa","waiting":"b603b638","to wait":"ea95be7d","wait":"7c9ffb3a","waited":"248bbf23","My parents want me _____ a doctor.":"e8224f49","to be":"106f8dcf","being":"0f25910a","am":"00597733","I spend half an hour _____ football every day.":"811b6755","playing":"b446c5b9","to play":"ea92159e","play":"7c9c525b","played":"14fa6284","He saved money _____ he could buy a new bike.":"b0777e30","so that":"9d99f958","While I _____, the phone rang.":"952e6d7f","was cooking":"1d6b9c5a","cooked":"f6e50d9a","cook":"7c953ff1","am cooking":"aeaccc7d","— What were you doing at eight last night? — I _____ my homework.":"f2bf0099","was doing":"834557e1","am doing":"19262344","It is important to accept who you are.":"301dd600","It is + adj. + to do":"cb0ca127","It is important to read English every day.":"1835f7bc","It is important read English every day.":"765850b9","It important to read English every day.":"3319a360","It is important reading English every day.":"e4254237","She is proud of what she has done.":"c322a5c4","be proud of":"d045facb","We are proud of our school.":"9fd2d804","We are proud for our school.":"a9374956","We proud of our school.":"3a23f0ac","We are proud with our school.":"e00fbfab","He used to hate his birthmark.":"17949efe","I used to walk to school.":"fb1e620a","I used to walking to school.":"64c01ae8","I use to walk to school.":"48e400c6","I am used to walk to school.":"6ccca258","They reached an agreement at last.":"72253a69","We reached an agreement at last.":"82b9c08b","We reached agreement at last.":"7d5ee2fc","We reached an agree at last.":"33153877","We reached an agreement in last.":"16eafb0d","Why not take turns?":"77d21aae","Why not do ...?":"40ec1eea","Why not ask the teacher?":"7eec7de9","Why not to ask the teacher?":"8ce74d0c","Why not asking the teacher?":"6f2298c7","Why don’t ask the teacher?":"0ccc4426","Neither of them wanted to give in.":"53338ecd","Neither of the answers is right.":"c5621b15","Neither of the answers are right.":"f78d56f1","Neither of answer is right.":"697995a1","Neither the answers is right.":"d4b9b300","He was curious about how things work.":"900367ae","Children are curious about space.":"8a599da5","Children are curious of space.":"3cc1835f","Children curious about space.":"240957cd","Children are curious with space.":"d8e9fde6","He worked day and night in order to finish it.":"1c3fe72b","in order to do":"8400676e","He got up early in order to catch the early bus.":"3942a08d","He got up early in order to catching the early bus.":"9c9346ab","He got up early in order catch the early bus.":"6590beca","In order to he caught the early bus.":"b82365da","It took him three years to build it.":"908e79f7","It takes sb. some time to do":"e1333f16","It took me two hours to do my homework.":"593ecb52","It took me two hours doing my homework.":"79ccf2ed","It spent me two hours to do my homework.":"c997955f","I took two hours to do my homework.":"ce380cac","They pay with phones instead of cash.":"32f3a43c","He walks to school instead of taking a bus.":"4c0a6733","He walks to school instead of take a bus.":"998fd17a","He walks to school instead taking a bus.":"c5c7b4fe","Instead of he walks to school.":"853f45ea","I look forward to hearing from you.":"eddeb538","look forward to doing":"67871ae3","I look forward to seeing you.":"403cf4e1","I look forward to see you.":"cd1aa3e3","I look forward seeing you.":"03c2dbde","I am look forward to seeing you.":"648eac2f","It is so convenient that everyone loves it.":"1a0b0e8b","so ... that ...":"d8d433ec","The box is so heavy that I can’t move it.":"bf7d4125","The box is so heavy to I can’t move it.":"b78c28f7","The box is such heavy that I can’t move it.":"cabad296","The box so heavy that I can’t move it.":"1f9fc0e9","We mustn’t run in the hallway.":"4513e7d2","You mustn’t smoke here.":"53c4da97","You mustn’t to smoke here.":"677bd4da","You mustn’t smoking here.":"37c48630","You must not to smoke here.":"a02f7eb0","The teacher told him to walk slowly.":"4a49f4bd","ask / tell sb. to do":"79c7d77d","Mum asked me to clean my room.":"5acdfde5","Mum asked me clean my room.":"1e953382","Mum asked me cleaning my room.":"0d6d70e0","Mum asked to me clean my room.":"5a5f9845","When the typhoon came, we were having dinner.":"8dc577a5","When the earthquake happened, he was sleeping.":"58522491","When the earthquake happened, he slept.":"3daf7797","When the earthquake was happening, he slept.":"418495d7","When the earthquake happens, he was sleeping.":"103f5a3b","I have been to Beijing twice.":"803e3611","He has been to Shanghai twice.":"06f95218","He has gone to Shanghai twice.":"16d48347","He has been Shanghai twice.":"2636a195","He has been to Shanghai two times ago.":"1110184f","Nothing is impossible as long as you try.":"eb12df31","You will succeed as long as you stick to it.":"a5f73457","You will succeed as long you stick to it.":"4627e703","You succeed as long as sticking to it.":"1d549020","As long as you will stick to it, succeed.":"294c7be6","I have lived here for ten years.":"d790b7ca","They have learnt English for five years.":"13884436","They have learnt English since five years.":"d1063ba1","They learnt English for five years now.":"ab62c0e6","They have learn English for five years.":"434ca122","He decided to post his design online.":"a77f91ee","decide to do":"67edfc59","She decided to take part in the competition.":"36d72697","She decided taking part in the competition.":"01eff9ed","She decided take part in the competition.":"acaaf934","She decided to taking part in the competition.":"c7dd0c10","He kept working on it.":"066d96af","It kept raining all night.":"32dfd87f","It kept to rain all night.":"18b6f3c4","It keeps raining all night last night.":"f75d87d1","It kept rain all night.":"20f83601","Mobile payment allows us to pay quickly.":"1c001372","allow sb. to do":"987ccb9d","The teacher allows us to use dictionaries.":"4e5c0d78","The teacher allows us using dictionaries.":"4ddc6a4e","The teacher allows we use dictionaries.":"9eb9b1e9","The teacher allow us to use dictionaries.":"04ac03e5","He stopped to have a rest.":"becd0185","He stopped to answer the phone.":"ebe8110d","He stopped answering the phone.":"45451f48","He stopped answer the phone.":"45a6086a","He stopped to answering the phone.":"6103890b","The rules are so strict that everyone follows them.":"b0afc904","so + adj. + that":"b2c3daab","The question is so easy that I can do it.":"31cbfbb8","The question is so easy to I can do it.":"a06e118a","The question is such easy that I can do it.":"c7d71249","The question so easy that I can do it.":"7cb6ab5c","I heard her singing when I passed by.":"49aaf704","hear sb. doing":"cbd3ddf9","I heard him playing the piano when I passed by.":"8d47de20","I heard him play the piano when I passed by.":"23b2d9a2","I heard him to play the piano when I passed by.":"e6b95785","I heard him played the piano when I passed by.":"0802300b","How did Sally feel about her birthmark at first?":"23cb075f","She hated it.":"d6300d16","She was proud of it.":"cc1da8fa","She didn’t care about it.":"3476bbd2","She wanted to show it.":"4dae74b7","What did her friend say about the birthmark?":"2edbff0d","It was ugly.":"cfb4c37c","It made her special.":"9c50d5c7","It should be covered.":"ccd8652e","It looked like a star.":"60d4422e","What can we learn from the story?":"087eca4e","Friends are not important.":"11712385","We should cover our faces.":"6c1eb035","We should accept who we are.":"99c46750","Mirrors can change people.":"210930be","What did the two brothers argue over?":"1381347d","A TV programme.":"bd1efc68","Their homework.":"057dd77b","A football match.":"a966fc94","Their mother.":"da7cb4fe","What did the mother advise them to do?":"26d05959","To stop watching TV.":"f78639bb","To take turns.":"987c9ef7","To ask their father.":"f952b3cb","To watch together.":"c45f276f","The phrase \"reached an agreement\" means that they _____.":"d60d2328","went on arguing":"66f2074d","agreed with each other":"4aec347c","gave up the TV":"f46f27d8","asked for help":"ed8c847d","What made Easton decide to make an artificial arm?":"77a8719f","A science class.":"cdea0f04","A girl with an artificial arm.":"cf25d1c5","His own hobby.":"f201c45f","Which two words best describe Easton?":"038dc519","Lazy and quiet.":"b627aeae","Curious and hard-working.":"cba52b1d","Shy and afraid.":"ac434101","Rich and lucky.":"f67604f4","Which is TRUE according to the passage?":"00d10c65","His invention was expensive.":"b03d3933","He failed in the end.":"f7c7b754","His invention was cheap but useful.":"88f8a13c","He only helped one child.":"cf83c45a","How do people pay according to the passage?":"5bd96fe6","By showing a QR code.":"44788dcc","By using cash only.":"cfd64d15","By writing a letter.":"ff6bb563","By sending a card.":"f5d9c631","What should you do to stay safe?":"90b8841a","Keep your password safe.":"da633459","Never use a phone.":"d430b87b","Pay with cash only.":"c419fd9a","Tell others your code.":"52a99de3","What is the best title for the passage?":"8f4ebdd1","How to Make a QR Code":"294e8eb3","Paying with Phones in China":"2067ab30","Shopping in a Supermarket":"42841bf8","Keeping Away from Phones":"0b09423b","What must students do in this school?":"2ece6e25","Run in the hallway.":"50b943b2","Wear school uniforms.":"3ec69b9d","Come late.":"0fa70c3d","Bring phones.":"2de1e912","What happened last week?":"83eed65d","A boy knocked into a teacher.":"dfd9fc54","A teacher ran away.":"3e434103","The school closed.":"9c1a5ad6","A boy got hurt badly.":"4e468f77","Why does the school make such rules?":"dfe1bd8c","To make students tired.":"37d46fa6","To keep students safe.":"ca82c254","To save money.":"03b5be4d","To make the school famous.":"4a0636a8","What happened last summer?":"2cfa060a","A typhoon hit the city.":"eb217084","An earthquake hit the city.":"6fa0bf6c","A fire broke out.":"eda020a5","A heavy snow came.":"cefad8ee","What did the family do during the typhoon?":"0c83a1fa","They drove to the sea.":"1958036a","They stayed indoors and listened to the radio.":"65d25b33","They climbed the trees.":"77ba2bc1","They went to school.":"f6e62856","What does \"beat against\" mean in the passage?":"10ca9147","What does Mr Li often help the family do?":"9ba525f2","Look after their dog.":"ce06a490","Cook dinner.":"030b8bff","Clean the house.":"f0a454db","Feed the birds.":"a307e9fc","What did the family do when Mr Li was ill?":"7f1b5911","They took turns to visit him.":"aac1b316","They went away on holiday.":"d840eaa4","They asked a doctor to move in.":"5daa16d2","They gave him cookies only.":"0281435d","What is the main idea of the passage?":"bedf1227","Being kind to neighbours makes life better.":"9e9b6d2e","Dogs are lovely friends.":"4b3f41de","Visiting sick people is a rule.":"5233e004","Cookies are the best gift.":"3d1ce431","What did Mia build?":"299df850","A solar cooker.":"5a0f8f78","A model plane.":"8fc90155","A small robot.":"d2ec5813","A toy car.":"56fadfa6","What does the solar cooker use to heat food?":"bb137942","Sunlight.":"c7a50921","Electricity.":"c30e9554","Firewood.":"eed3fdf2","Batteries.":"46a959f6","What can we learn from the teacher’s words?":"c351fba4","We should not be afraid of failure.":"31209e1a","Science projects are easy.":"6e8199c1","Cooking rice is difficult.":"ef0303d6","Foil is expensive.":"9f039650","Why did the villagers leave their homes?":"1ac65f9c","Because of the flood.":"60f75af5","Because of a fire.":"2de294a7","Because of an earthquake.":"f5f69f7a","Because of a storm only.":"4a1bf778","Who brought the villagers food and water?":"3f7562d5","Volunteers.":"c133154a","Farmers.":"525e6183","Doctors.":"8d10d031","Teachers.":"7a3da1c2","What happened after a week?":"a0b35f7c","People returned home safely.":"709629ae","The rain became heavier.":"7cf805ff","The village was gone.":"793fa00c","People built new houses.":"97005339","Maddie":"c2901349","studied":"af3d25f7","my face":"e708583a","looking away":"305cf56a","Sally":"0e13fc8a","has":"0b887a41","accepted":"b3bc385e","her birthmark":"bc7652e8","I":"0002b5ee","that":"7c9e72d6","I am":"7c85ac3c","what":"7ca017f9","The Giant":"d44f3179","a long time":"90358085","We":"005975e1","should":"1bb91794","get along with":"30f46bf2","our neighbours":"06bb0111","Su Bingtian":"149785f9","trained":"f625fa8c","hard":"7c97c2a4","since 2000":"047eb6f9","He":"005973f2","decided":"085324c7","his design":"5285cd03","They":"7c8ce73f","hope":"7c97fdf1","to invent":"c749473c","a new machine":"e2887465","built it":"1814bee2","out of":"13510852","plastic blocks":"6e7e7d93","and fishing line":"dc2c3608","Mobile payment":"836f005b","allows":"f202e117","us":"005979cd","smartphones":"d3449e79","going back":"45277e0a","to China":"39a46a2b","to a quiet area":"c65ebe4a","But":"0b87db30","we":"00597a01","always":"f208adf6","face them":"93863462","with courage":"4c9348a7","was sleeping":"905158c7","when":"7ca01877","the ground":"2ad74015","very hard":"3d9ea32a","My mother":"4c4c0eba","rushed into":"c0a8700a","my room":"e70f29e8","to wake me up":"be077fa7","The air":"3faaefc2","was thick with":"22688cff","and ash":"364ce214","began to fall":"cc2eb404","It":"00597422","is":"00597841","accept":"f15ae9b5","who":"0b88baf3","you":"0b88c462","She":"0b8821c5","used to":"45b9ba39","the birthmark":"420fa8ca","on her face":"70960f30","known":"0fcd77b2","each other":"e6dd0bf8","reached":"3ddb0d11","an agreement":"200de62c","at last":"3fa7006e","enjoys":"fb7a9c1d","problems":"2a066ea9","makes me":"3f873f48","happy":"0f9010a7","You":"0b883c42","mustn’t":"e39da2a9","here":"7c97d3a9","While":"0e60285e","the phone":"66c2ed60","rang":"7c9d3ded","Maddie studied my face instead of looking away":"188531d2","Sally has accepted her birthmark":"871e4e62","I have already learnt that I am what I am":"7fa3d3ed","The Giant has been away for a long time":"2e287e68","We should get along with our neighbours":"562c3bc9","Su Bingtian has trained hard since 2000":"ca07a1ef","He decided to post his design online":"88f459c0","They hope to invent a new machine":"0047de82","He built it out of plastic blocks and fishing line":"8dde66cd","Mobile payment allows us to use smartphones":"a995a799","I look forward to going back to China":"34ae9386","I went to a quiet area in order to read":"42249c03","But we should always face them with courage":"9ad55b2b","I was sleeping when the ground shook very hard":"2419d1db","My mother rushed into my room to wake me up":"eaf493c4","The air was thick with smoke and ash began to fall":"a8dd95e9","It is important to accept who you are":"f1f16392","She used to hate the birthmark on her face":"ff76fd4b","How long have you known each other":"e756ad44","They have reached an agreement at last":"c28c447f","She enjoys fixing problems":"4ace01e6","It makes me feel happy":"11a29e23","You mustn’t smoke here":"95eeb149","While I was cooking the phone rang":"ad3fe21f","English is spoken all over the world":"ebaf9a79","A new library will be built in our school":"51758a19","The bridge was built about twenty years ago":"c09e5cff","I was helped by my friends when I was in trouble":"b5877ad1","We should work as a team and keep calm":"8b40af24","A great team is made of different strengths":"e4fb0521","They volunteered to help the homeless last winter":"dbff7b26","A small act of kindness can make a difference":"18837fc7","I believe that nature is full of secrets":"14354047","Do you know whether the amber is real":"1c0c1e93","We should live in harmony with nature":"58266f60","He told me that he would use solar energy":"bdd86e78"};</script>
@@ -1885,31 +1948,64 @@ function cloud(){
     if (!cands.length) return localFallback();          /* 一个云端都没配：只能本机 */
     /* 并行打所有后端，但**主库优先**：Turso 一回话就用它（不论快慢），
        保证所有设备读的是同一份数据，多用户才能互相看见。 */
-    var jobs = cands.map(function (n) {
-      var t0 = tick();
-      return READERS[n]().then(function (res) {
-        markOk(n, tick() - t0);
-        return { n: n, res: res, ms: tick() - t0 };
-      }).catch(function (e) {
-        markBad(n, e);
-        return { n: n, res: null, err: String((e && e.message) || e) };
+    /* [2026-10-06 重构·读路径只走权威源] 原来这里是「并发打所有后端 + 等全部回来」。
+       实测问题（真库，2026-10-06）：
+         Turso 主库 262ms 正常 / jsonbin GET 403 已失效 / Supabase 境外慢
+         → 平均 1386ms、最慢 2125ms，全花在等一个已经坏掉的库上。
+       备份的正确做法是**写完异步补一份**，不该挂在读路径上拖慢每一次加载。
+
+       现在的规则：
+         ① 默认只读 Turso（唯一权威源，多用户才能互相看见）；
+         ② Turso 真·网络失败才回落读备库（这才是备库该出场的时候）；
+         ③ 连续失败的后端自动熔断若干秒，不再每拍都去戳 403 的接口；
+         ④ 写仍然广播所有后端（见 commit，异步不阻塞），所以备库始终是热的新数据。 */
+    var DEAD_MS = 60000;                     /* 连续失败超过这个时间就熔断，别再戳 */
+    function live(n) {
+      var h = HEALTH[n] || {};
+      if (h.ok) return true;
+      return !(h.at && (now() - h.at) < DEAD_MS);
+    }
+    var primary = tsCfgReady() && live('ts') ? 'ts' : null;   /* 熔断中就别硬打主库了 */
+    if (!primary) {
+      /* 主库没配 / 正在熔断 → 这次直接走备库（比干等一个已知会失败的请求强） */
+      var alt0 = cands.filter(function (n) { return n !== 'ts' && live(n); });
+      if (!alt0.length) return localFallback();
+      return Promise.all(alt0.map(function (n) {
+        var t0b = tick();
+        return READERS[n]().then(function (res) {
+          markOk(n, tick() - t0b);
+          if (res && res.data) { _active = n; return { n: n, res: res, ms: tick() - t0b }; }
+          return null;
+        }).catch(function (e) { markBad(n, e); return null; });
+      })).then(function (outs) {
+        var got = outs.filter(Boolean).sort(function (a, b) { return a.ms - b.ms; });
+        if (got.length) return got[0];
+        return localFallback();
       });
-    });
-    return Promise.all(jobs).then(function (outs) {
-      var ts = outs.find(function (o) { return o.n === 'ts'; });
-      /* 主库回话了就用主库（有数据或空表都算回话；空表说明还没人写，正常） */
-      if (ts && ts.res) { _active = 'ts'; return ts; }
-      /* 主库挂了 → 退到其它后端里最快带回数据的那个（Supabase 优于 jsonbin 等） */
-      var alt = outs.filter(function (o) { return o.n !== 'ts' && o.res && o.res.data; });
-      if (alt.length) {
-        alt.sort(function (a, b) { return a.ms - b.ms; });
-        _active = alt[0].n;
-        return alt[0];
-      }
-      /* 都没数据 → 用第一个没报错的（通常是刚初始化的空表），否则本机兜底 */
-      var anyOk = outs.find(function (o) { return o.res; });
-      if (anyOk) { _active = anyOk.n; return anyOk; }
-      return localFallback();
+    }
+
+    /* 正常情况：只读 Turso，一回话就返回，不等任何人 */
+    var t0 = tick();
+    return READERS.ts().then(function (res) {
+      markOk('ts', tick() - t0);
+      _active = 'ts';
+      return { n: 'ts', res: res, ms: tick() - t0 };
+    }).catch(function (e) {
+      markBad('ts', e);
+      /* 主库真挂了 → 这时候才去问备库要数据（它一直是热备，因为写会广播） */
+      var alt = cands.filter(function (n) { return n !== 'ts' && live(n); });
+      if (!alt.length) return localFallback();
+      return Promise.all(alt.map(function (n) {
+        var t1 = tick();
+        return READERS[n]().then(function (res) {
+          markOk(n, tick() - t1);
+          return (res && res.data) ? { n: n, res: res, ms: tick() - t1 } : null;
+        }).catch(function (e2) { markBad(n, e2); return null; });
+      })).then(function (outs) {
+        var got = outs.filter(Boolean).sort(function (a, b) { return a.ms - b.ms; });
+        if (got.length) { _active = got[0].n; return got[0]; }
+        return localFallback();
+      });
     });
   }
 
@@ -1919,7 +2015,12 @@ function cloud(){
      现在按 TTL 复用：**超过 TTL 的读会自动重拉**，轮询才拿得到别人的新数据。
      写类操作传 force=true 强制先拉最新再改，避免把旧快照整表覆盖回去。 */
   var _TTS = 0;            /* _T 的拉取时刻 */
-  var TABLE_TTL = 4000;    /* 4 秒：同一波重复调用合并成一次请求，又不耽误 20 秒轮询看新数据 */
+  /* [2026-10-06 实测提速] 4 秒 → 12 秒。
+     为什么：这是**整表下载**，每次读都要传整张表。好友页轮询间隔 15 秒 > 旧的 4 秒 TTL，
+     等于每拍都真下载一次完整表，缓存形同虚设（实测「TTL 内重复读」仍要 959ms 就是这个原因）。
+     改成 12 秒后：轮询的第一拍若与上一次其它读撞上可以复用；
+     而**写前那条 load(true) 强制新鲜完全不受影响**，所以数据一致性不降。 */
+  var TABLE_TTL = 12000;
   /* 只在**第一次**拉表时做一次：把「本机有、云端没有」的账号并进云端表。
      为什么必须有这一步：断网 / 没配云的时候孩子照样能注册能玩（本机模式），
      那份进度只躺在 localStorage 里。改成「一律读云端」之后，如果直接拿云端表覆盖，
@@ -2904,13 +3005,19 @@ function cloud(){
        （礼物 gift_list → 在线名单 wc_players → 好友 friends_list → 挑战 duel_list），
      而读缓存 TTL 只有 4 秒 —— 网络慢时每一步都超 4 秒、缓存永远过期，
      每一步都在完整下载整张表（60KB × 4 次串行），用户实测一次进页要 5~6 秒。
-     现在一次拉表（load(true) 强制新鲜）把五样东西全部组装好一次性带回：
+     现在一次拉表把五样东西全部组装好一次性带回：
        players（在线名单）/ social（好友+申请）/ duels（挑战）/ gifts（礼物）/ unread（角标）
      一次渲染 = 1 次云端往返，慢网络下从 5~6 秒降到 1 次请求的时间。 */
   H.wc_friend_page = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
     var pw = String((b && b.p_pw) || '');
-    return load(true).then(function () {
+    /* [2026-10-06 提速] 原来是 load(true)（强制新鲜，**绕过读缓存**）——
+       好友页 15 秒轮询每拍都在完整下载整张表，实测「TTL 内重复读」仍要 1155ms。
+       这个接口是**纯读**（不写库），不需要防「旧快照覆盖别人」，所以改回 load() 吃缓存：
+         · 前端轮询间隔 15s > TTL 12s → 每拍仍会真读一次，别人新消息/礼物照样看得到；
+         · 同一拍里进页的其他读（unread / players 等）能复用同一份表，不再重复下载。
+       写类动作仍走 SOC_W 的 load(true) 强制新鲜，一致性不受影响。 */
+    return load().then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       if (r.pw && pw && r.pw !== pHash(pw)) return { ok: true, data: { ok: false, msg: '密码不对' } };
@@ -3389,6 +3496,9 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
+
+
 
 
 
@@ -4367,10 +4477,6 @@ window.addEventListener('unhandledrejection',function(e){ const r=e&&e.reason; c
   try{ toast('出错了：'+m); }catch(_){}
 });
 /* 全局昵称查重（注册按钮也要用，原来只有「新建档案」按钮里有一份局部的） */
-function nameClash(n){ n=(n||'').trim().toLowerCase(); if(!n)return '';
-  const me=USERS.find(x=>x.id===UID)||null;
-  const hit=USERS.find(x=>x!==me&&x.name&&((x.name||'').trim().toLowerCase()===n));
-  return hit?(hit.name||''):''; }
 function cloudRegister(){
   const genId=()=>{ const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     for(let t=0;t<20;t++){
@@ -5449,8 +5555,8 @@ function pmPetLv(p){
      v1 倍数制 0.1~2.0 → Lv1 只有 7px，放在大食盆旁像两只小虫子（用户看截图要求重定）
      v2 25~120px → 25px 仍偏小（用户要求「再加一点」）
      v3 30/40/50/60/70/80/90/120（当前）：每档差 10px 递增，Lv1=30px 与 66px 的食盆比例协调
-   两处都要接：① 地图上自由溜达的（petSVG）② 房子前探头的那只（.pmHousePet 原来被 CSS 写死 25px，
-   这是「两只宠物有一只不变大」的根因）。Lv200+ 封顶 120px 不再变大。
+   现在只有一个显示处：地图上自由溜达的那只（petSVG → petSVGBase，直接把目标像素写进 .pmLive）。
+   房子前探头那只与院子副宠物都已删除，避免同一只画两遍。Lv200+ 封顶 120px 不再变大。
    预览页 tools/pet_size_preview.html 与线上读同一份表，所见即所得。 */
 const PET_TIERS=[[1,10,30],[11,30,40],[31,50,50],[51,70,60],
                   [71,90,70],[91,100,80],[101,150,90],[151,200,120]];
@@ -8377,7 +8483,9 @@ function refreshBoardsAfterMe(){
     const fe=document.getElementById('scr-friend');
     /* [2026-10-06 修闪屏] 停在好友页时就地打补丁（在线状态/未读徽标），别整页重画 */
     if(fe&&fe.classList.contains('active')){ if(!_chatWith) frPatchLive(false); }
-    else renderFriendPage().catch(function(){});
+    /* [2026-10-06 提速] 原来「不在好友页」也会 renderFriendPage()：
+       你明明停在首页/宠物页，却因为别人上下线而整页读一次云 + 重建一堆看不见的 DOM。
+       现在只在好友页里才刷新好友页；离开后回来时本来就会重新渲染。 */
   }catch(e){}
 }
 async function loadFriends(){
@@ -8394,20 +8502,11 @@ async function loadFriends(){
     _friendLoaded=true;
   }
 }
-let frReq=[], _chatWith=null, _frDuels=[];
+let frReq=[], _chatWith=null, _frDuels=[], _bowlIv=null;
 const QUICK=['👍 加油','⚔️ 来一局','🎯 今天我领先啦','📚 一起背单词','💪 别放弃','🌙 早点休息','🏆 向你学习','🙌 谢谢你'];
 
-function frCard(t){
-  return '<div class="chartWrap" style="margin-top:0"><div class="chartTit">'+t+'</div>';
-}
-/* [v18] 渲染令牌 + 卡死兜底。
-   原来 renderFriendPage 里任何一处抛异常（服务端字段形状变了、某个 helper 报错…）
-   都会让它永久停在「正在加载…」，只能刷新页面。这次彻底修掉：
-   1) 整个渲染体包 try/catch，出事就显示「加载失败 + 重新加载」按钮；
-   2) 看门狗：只要好友框里还挂着「正在加载…」超过 6 秒，先自动重试一次，
-      再不行才换成重试按钮（不等用户干等，也不用刷新页面）；
-   3) 用 _frSeq 令牌，慢的旧渲染不要覆盖新渲染。 */
-let _frSeq=0, _frWatch=null;
+/* [2026-10-06 删] frCard 已随好友页重构废弃，全文件无调用 */
+
 function frRetryBox(w,title,sub){
   if(!w)return;
   w.innerHTML='<div style="text-align:center;padding:28px 14px"><div style="font-size:34px">⚠️</div>'
@@ -8425,6 +8524,10 @@ function frWatchStart(w){
     try{
       /* 内容正常出来了 / 元素都换掉了 → 收掉看门狗 */
       if(!w||!w.isConnected||(w.textContent||'').indexOf('正在加载')<0){ frStopWatch(); return; }
+      /* [2026-10-06 修] 好友屏已经不 active = 人已经离开了：
+         这时自动重试会重启 15 秒轮询，于是「停在首页时后台仍每 15 秒下载一次整表」。
+         现在只在人真的停在好友页时才重试。 */
+      if(!frPagePolling()){ frStopWatch(); return; }
       if(Date.now()-t0<=6000) return;
       frStopWatch();
       /* 先悄悄自动重试一次，还不出来才把按钮给用户 */
@@ -8452,7 +8555,9 @@ async function renderFriendPageInner(seq){
   pmGiftPollStart(w);
   const lk=cloudLink();
   if(!lk){ w.innerHTML='<div style="text-align:center;padding:24px 10px"><div style="font-size:40px">👥</div><div style="font-size:14px;color:#55617c;margin:10px 0;line-height:1.8">加好友、发消息、打挑战赛<br>需要先登录云端账号</div><button class="bigBtn" id="frGoLogin" style="max-width:220px;margin:0 auto;display:block">去登录 / 注册</button></div>'; $('#frGoLogin').onclick=()=>{renderLogin();go('scr-login')}; return; }
-  pmGiftPollUnread();
+  /* [2026-10-06 提速] 原来这里还有一次 pmGiftPollUnread()（不 await 的整表读），
+     但紧接着的 wc_friend_page 合并接口已经把 unread 回填了（见下 d.unread → pmUnreadMerge）——
+     等于同一时刻向云端要了两次整张表。删掉；只有合并接口失败走老路径时才补读。 */
   if(seq!==_frSeq)return;
   if(_chatWith){ await frRenderChat(); return; }
   if(seq!==_frSeq)return;
@@ -8483,6 +8588,8 @@ async function renderFriendPageInner(seq){
     }
   }catch(e){}
   if(!dr){
+    /* 老路径（合并接口不可用）没有 d.unread，这里补读一次未读 */
+    pmGiftPollUnread();
     await pmGiftLoadMine();
     if(seq!==_frSeq)return;
     const [pm0]=[await fetchPlayers()];
@@ -8835,7 +8942,6 @@ function buyItem(k){
   toast('兑换成功：'+ITEM_INFO[k].i+' '+ITEM_INFO[k].n);renderPetPage();
 }
 /* ---------- 技能卡（道具）发放 / 宠物技能生效 ---------- */
-function isAdminAcc(){ const lk=cloudLink(); return !!(lk&&lk.aid==='ABC123'); }
 function grantItem(k,n,why){
   if(n==null)n=1; if(n<=0)return null;
   items[k]=(items[k]||0)+n; saveAll(); cloudPushDebounced();
@@ -9381,7 +9487,6 @@ function pmRoomOpen(){
   /* 屋内画的就是自家宠物，院里那几只先藏起来，避免同一只出现两次 */
   map.classList.add('pmRoomOpen');
   Array.prototype.forEach.call(map.querySelectorAll('.pmWalk'), function(e){ e.style.visibility='hidden'; });
-  Array.prototype.forEach.call(map.querySelectorAll('.pmHousePet'), function(e){ e.style.visibility='hidden'; });
   /* 屋内该显示谁：
      睡眠时段 → 所有已领养的（pmNightBed 由 pmStart 设为全部）
      白天     → 只显示「收在屋里没放出去的」那几只（花园里已有的不在此重复出现） */
@@ -9426,7 +9531,7 @@ function pmRoomClose(){
   if(map){
     map.classList.remove('pmRoomOpen');
     Array.prototype.forEach.call(map.querySelectorAll('.pmWalk'), function(e){ e.style.visibility=''; });
-    Array.prototype.forEach.call(map.querySelectorAll('.pmHousePet'), function(e){ e.style.visibility=''; });
+  
   }
 }
 /* 房子是每次渲染重建的，所以用事件委托绑在 #petMap 上，绑一次就一直有效 */
@@ -10246,9 +10351,7 @@ function pmEnsureStyle(){
    +'@keyframes pmTwinkle{0%,100%{opacity:.28;transform:scale(.85)}50%{opacity:1;transform:scale(1.12)}}'
    +'@keyframes pmLampGlow{from{box-shadow:0 0 0 rgba(255,206,110,0)}to{box-shadow:0 0 16px rgba(255,206,110,.55)}}'
    +'.pmHouse{position:absolute;right:5%;bottom:24%;font-size:86px;line-height:1;pointer-events:none;z-index:2;filter:drop-shadow(0 3px 4px rgba(0,0,0,.28))}'
-   /* ④ 让自家宠物从屋里探头 */
-   +'.pmHousePet{position:absolute;right:11.6%;bottom:23.5%;width:74px;height:74px;line-height:0;z-index:3;pointer-events:none;transform-origin:50% 100%;animation:pmHousePeek 3.2s ease-in-out infinite}'
-   +'.pmHousePet img{width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 2px 2px rgba(0,0,0,.28))}'   +'@keyframes pmHousePeek{0%,72%,100%{transform:translateY(0) rotate(0deg)}80%{transform:translateY(-4px) rotate(-4deg)}88%{transform:translateY(-6px) rotate(3deg)}94%{transform:translateY(-2px) rotate(0deg)}}'
+   /* ④ [2026-10-06 删] 「让自家宠物从屋里探头」(.pmHousePet) 已按用户要求移除 */
    +'.pmMap.night .pmHouse{filter:drop-shadow(0 0 14px rgba(255,206,110,.9)) drop-shadow(0 0 34px rgba(255,190,80,.5)) drop-shadow(0 3px 4px rgba(0,0,0,.3))}'
    +'.pmMap.night .pmHouse.lamp{animation:pmHouseGlow 2.6s ease-in-out infinite alternate}'
    +'@keyframes pmHouseGlow{from{filter:drop-shadow(0 0 10px rgba(255,206,110,.7)) drop-shadow(0 2px 4px rgba(0,0,0,.3))}to{filter:drop-shadow(0 0 24px rgba(255,206,110,1)) drop-shadow(0 0 46px rgba(255,190,80,.6)) drop-shadow(0 2px 4px rgba(0,0,0,.3))}}'
@@ -10514,28 +10617,26 @@ function pmRefreshPetSize(k){
         const w=el.querySelector('.pmLive');
         if(w){ w.style.width=px+'px'; w.style.height=px+'px'; w.dataset.lv=pmPetLvOf(k); }
       }
-      /* ② 房子前探头的那只（.pmHousePet）—— 之前被 CSS 写死 25px 不变，
-            「两只宠物有一只不变大」就是它。这里一起刷新。 */
-      const hp=map.querySelector('.pmHousePet');
-      if(hp){
-        const pet=petEnsure();
-        if(!k||pet.k===k){
-          hp.style.width=px+'px'; hp.style.height=px+'px';
-          hp.style.filter=petGlow(pmPetLvOf(k))||'';   /* petGlow 返回的就是完整 filter 值 */
-        }
-      }
+      /* [2026-10-06 删] ② 房子前探头的那只（.pmHousePet）已移除，刷新逻辑一并去掉。
+         副宠物不再单独画（它由 pmStart 的第二只 .pmWalk 承担，会走动、也走绝对像素尺寸），
+         所以这里不用再刷任何固定尺寸容器 —— 只改 .pmLive 的宽高即可。 */
     }
   }catch(e){}
 }
-/* [2026-10-06 新增] 取某只宠物的等级（petObj.pets[k].lv，兼容裸映射） */
+/* [2026-10-06 新增] 取某只宠物的等级（petObj.pets[k].lv，兼容裸映射）
+   [2026-10-06 修·真 bug] 原来主宠物走的是**第一条**分支读 petObj.lv（根字段），
+   但游戏内升级（喂食/自动吃食）改的是 petObj.pets[k].lv，根字段 petObj.lv 从不跟着更新
+   （全文件只有 petApplyCloud 那一次会写它）—— 于是主宠物永远按「进云端那一刻的旧等级」
+   算体型，升到 100 级也还是老大小。改成**一律以 pets[k].lv 为准**，根字段只当兜底。 */
 function pmPetLvOf(k){
   try{
     if(!k) return 1;
-    if(k===(petObj&&petObj.k)&&petObj&&typeof petObj.lv==='number'&&petObj.lv>0) return petObj.lv;
     if(petObj&&petObj.pets&&petObj.pets[k]){
       const v=petObj.pets[k];
-      return Math.max(1,(v&&typeof v==='object')?(Number(v.lv)||1):(Number(v)||1));
+      const lv=(v&&typeof v==='object')?(Number(v.lv)||0):(Number(v)||0);
+      if(lv>0) return lv;
     }
+    if(k===(petObj&&petObj.k)&&petObj&&typeof petObj.lv==='number'&&petObj.lv>0) return petObj.lv;
   }catch(e){}
   return 1;
 }
@@ -10649,6 +10750,10 @@ function pmStop(){
   pmTimers.forEach(function(t){clearInterval(t);clearTimeout(t+0)}); pmTimers=[];
   /* [v18] 连撒欢时新建的快跑定时器也要一起收掉，否则切页后会留下跑飞的宠物 */
   try{ Array.prototype.forEach.call(document.querySelectorAll('#petMap .pmWalk'),function(e){pmWalkStop(e)}); }catch(e){}
+  /* [2026-10-06 修·定时器泄漏] 昼夜定时与食盆轮询原来不在 pmTimers 里，
+     离开宠物页后一直常驻（每隔几小时自己醒一次）。现在一并清掉。 */
+  try{ if(pmPhaseTimer){ clearTimeout(pmPhaseTimer); pmPhaseTimer=null; } }catch(e){}
+  try{ if(_bowlIv){ clearInterval(_bowlIv); _bowlIv=null; } }catch(e){}
 }
 function pmSay(t,el){
   const b=document.getElementById('pmBub'); if(!b)return;
@@ -10776,34 +10881,17 @@ function pmPetLineupHTML(){
    院子里草地上再站一只「副宠物」= pets 映射里等级最高的另一只，
    两只同时在场、各按自己等级缩放发光，升级看得见。
    没有第二只宠物时，这个位置就是空的（不会显示空气）。 */
-function petSecond(){
-  try{
-    var p=petEnsure();
-    if(!p.pets||typeof p.pets!=='object') return null;
-    var best=null,bv=0;
-    for(var kk in p.pets){
-      if(!Object.prototype.hasOwnProperty.call(p.pets,kk)) continue;
-      if(kk===p.k) continue;                              /* 排除主宠物 */
-      var v=p.pets[kk], lv=(v&&typeof v==='object')?(Number(v.lv)||0):(Number(v)||0);
-      if(lv>bv){ bv=lv; best=kk; }
-    }
-    return best?{k:best,lv:bv}:null;
-  }catch(e){ return null; }
-}
-function petYardPetHTML(){
-  var s2=petSecond();
-  if(!s2) return '';                                    /* 只有一只 → 副位空着 */
-  var sc=petScale(s2.lv);
-  return '<img src="'+petImgSrc(s2.k)+'" alt="" style="transform:scale('+sc+');'
-    +'transform-origin:50% 100%;transition:transform .4s;'+petGlow(s2.lv)+'">';
-}
 function pmBowlTap(){
   const b=document.getElementById('pmBowl'); if(!b)return;
   /* [v17] 点食盆 = 一键加满（以前只是重绘） */
   try{ petFillBowl(); }catch(e){}
   renderGifts();
   pgTick(); pmBowlPaint();
-  pmTimers.push(setInterval(pmBowlPaint,1000));
+  /* [2026-10-06 修·定时器泄漏] 原来每点一次就 push 一个新的 1 秒 interval，
+     连点 N 次食盆就有 N 个冗余轮询同时跑（而且离开页面才清）。现在先清掉上一个再起。 */
+  try{ if(_bowlIv){ clearInterval(_bowlIv); _bowlIv=null; } }catch(e){}
+  _bowlIv=setInterval(pmBowlPaint,1000);
+  pmTimers.push(_bowlIv);
 }
 /* 到点自动切换天色：19:00 入夜、06:00 天亮，页面开着也能自己换，不用手动刷新 */
 let pmPhaseTimer=null;
@@ -11126,14 +11214,15 @@ function renderPetMain(bd){
       +'<div class="pmCloud c3">☁️</div>'
       +'<div class="pmGrass">'+pmGrassHTML()+'</div>'
       +'<div class="pmYard'+(pmIsDusk()?'':'')+'"></div>'
-      +'<div class="pmYardPet'+((pmIsNight()||pmSleepState(p).manual||pmInsideKeys().length)?'':' style="visibility:hidden"')+'">'+petYardPetHTML()+'</div>'
+      /* [2026-10-06 删] 副宠物原来在房子左侧另画一个 .pmYardPet（30px 固定容器 +
+         transform:scale），有两个问题：① 容器写死 30px，等级再高也长不大（用户反馈"没变大"）；
+         ② 它和 pmStart 画的第二只 .pmWalk 是同一只宠物，等于同一只画了两遍。
+         现在两只统一由 pmStart 画成 .pmWalk（会走动 + 走绝对像素尺寸），这里不再重复画。 */
       +'<div class="pmTree t1">🌳</div><div class="pmTree t2">🌳</div><div class="pmTree t3">🌲</div><div class="pmTree t4">🌳</div>'+'<div class="pmHouse'+(pmIsDusk()?' lamp':'')+'">🏠</div>'
-      /* [2026-10-06 修] 房子前探头的那只原来被 CSS 写死 25px，所以「两只宠物有一只不变大」。
-         尺寸改成按等级算。注意：visibility 和宽高必须写在**同一个 style 属性**里 ——
-         写成两个 style 后浏览器只认第二个，宽高会被丢掉（这是本轮踩到的坑）。 */
-      +'<div class="pmHousePet" style="width:'+petSizePx(pmPetLv(p))+'px;height:'+petSizePx(pmPetLv(p))+'px;'
-        +((pmIsNight()||pmSleepState(p).manual||pmInsideKeys().length)?'':'visibility:hidden;')+petGlow(pmPetLv(p))+'">'
-      +'<img src="'+petImgSrc(p.k)+'" alt=""></div>'
+      /* [2026-10-06 删] 房子前探头的那只（.pmHousePet）已按用户要求移除 ——
+         花园里已经有「主 + 副」两只在草地上自由走动，房子门口再站一只显得重复，
+         而且它和副宠物在同一片区域容易看成三只、点哪只都不确定。
+         相关代码（HTML/CSS/夜间显隐/升级刷新）一并清掉，别留半截死代码。 */
       +'<div class="pmHouseTip">🔍 点房子看屋里</div>'
       +'<div class="pmBowl'+(pmIsDusk()?' night':'')+'" id="pmBowl" onclick="pmBowlTap()"></div>'
       +'<div class="pmFence"><i></i></div>'
