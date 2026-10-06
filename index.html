@@ -9402,9 +9402,9 @@ function pmRoomOpen(){
             const r=Math.floor(i/per), c=i%per, cc=c-(per-1)/2;
             const sz=many>9?30:many>6?34:many>4?38:42;
             const spread=Math.min(24,bedW/per*0.8);
-            return '<div class="pmRoomPet" style="left:'+(50+cc*spread).toFixed(1)+'%;bottom:'+(22+r*15)+'%;width:'+sz+'px;height:'+sz+'px">'+petSVG(k,'room')+'</div>';
+            return '<div class="pmRoomPet" style="left:'+(50+cc*spread).toFixed(1)+'%;bottom:'+(22+r*15)+'%;width:'+sz+'px;height:'+sz+'px">'+petSVG(k,'room2')+'</div>';
           }).join('')
-        : (list.length?'<div class="pmRoomPet" style="left:'+(Number(bedL)+7)+'%;bottom:35%">'+petSVG(list[0]||p.k,'room')+'</div>':''))
+        : (list.length?'<div class="pmRoomPet" style="left:'+(Number(bedL)+7)+'%;bottom:35%">'+petSVG(list[0]||p.k,'room2')+'</div>':''))
     +(night?'<div style="position:absolute;right:11%;bottom:56%;width:26px;height:26px;line-height:26px;text-align:center;font-size:15px;border-radius:50%;background:radial-gradient(circle at 50% 50%,rgba(255,224,150,.95) 0%,rgba(255,206,110,.35) 55%,rgba(255,206,110,0) 78%);animation:pmLampGlow 2.6s ease-in-out infinite alternate">🛎️</div>'
           :'<div style="position:absolute;right:12%;bottom:56%;width:26px;height:26px;line-height:26px;text-align:center;font-size:15px">🧸</div>')
     +(night?'<div class="pmRoomZzz">Z z z</div>':'')
@@ -10055,7 +10055,17 @@ function pmProduceCheck(p,nowT){
   try{ if(typeof toast==='function')toast('🎁 陪满 2 小时啦，礼物落下来一份！'); }catch(e){}
   return 1;
 }
-function petLevelUp(p){ let up=0; while(p.grow>=petNeed(p.lv)&&p.lv<999){ p.grow-=petNeed(p.lv); p.lv++; up++; } if(up)toast('🎉 宠物升级啦！Lv.'+p.lv); return up; }
+function petLevelUp(p){
+  let up=0; while(p.grow>=petNeed(p.lv)&&p.lv<999){ p.grow-=petNeed(p.lv); p.lv++; up++; }
+  if(up){
+    toast('🎉 宠物升级啦！Lv.'+p.lv);
+    /* [2026-10-06 新增] 立刻刷新地图上这只的体型 ——
+       以前宠物升级只改数字，地图上大小一点不变，用户完全看不出「它长大了」。
+       现在只改 .pmLive 的宽高，不整页重绘。 */
+    try{ pmRefreshPetSize(p.k); }catch(e){}
+  }
+  return up;
+}
 function petSync(){
   const p=petEnsure(),d=today();
   try{ pmMoodSettle(); }catch(e){}     /* [v3.11] 隔天回来：补掉离开期间欠下的心情 */
@@ -10416,12 +10426,55 @@ function pmPoseAll(mode,ms){
   }catch(e){}
 }
 function petSVG(k,sz){
-  /* [v20] 屋里/列表里的小图标 40px（原来 52px 会顶出 40px 高的容器），地图上 74px */
-  const h=(sz==='room')?40:74;
-  return '<span class="pmLive" data-pk="'+pmEsc(k||'chick')+'" style="width:'+h+'px;height:'+h+'px">'
+  /* [v20] 屋里/列表里的小图标 40px（原来 52px 会顶出 40px 高的容器），地图上 74px
+     [2026-10-06 修·用户报「宠物尺寸没变化，还是这么大一只」]
+     真因：地图里自由溜达的那只（.pmWalk）尺寸是**写死的 74px**，
+     等级缩放 petScale() 只被我接到了「房子前那只」和「副宠物」上，散步的这只完全没接 ——
+     所以截图里两只明明等级差很多，看起来一样大。
+     现在把等级缩放乘进基准尺寸：Lv1 只有 0.1 倍（约 7px 小崽），Lv100+ 逐步长到 74px。
+     取整避免 74*0.1=7.4px 这类碎值导致边缘发虚。
+     内联 style 优先级高于 CSS 的 .pmLive{width:74px} 类规则，所以尺寸一定生效。 */
+  const base=(sz==='room')?40:74;
+  /* [2026-10-06] 图鉴列表那种固定 40px 格子里不要缩放（缩了会留大片空白），
+     只有「地图上自由溜达」和「屋内」这两种要看大小的场景才按等级缩放。
+     sz==='dex' 表示图鉴格子，保持基准尺寸。 */
+  if(sz==='dex'||sz==='room2') return petSVGBase(k,base);   /* 图鉴格子 / 屋内多只：不缩放 */
+  const lv=pmPetLvOf(k);
+  const h=Math.max(6,Math.round(base*petScale(lv)));
+  return petSVGBase(k,h,lv);
+}
+function petSVGBase(k,h,lv){
+  return '<span class="pmLive" data-pk="'+pmEsc(k||'chick')+'"'+(lv?' data-lv="'+lv+'"':'')
+    +' style="width:'+h+'px;height:'+h+'px">'
     +['idle','walk','eat','happy'].map(function(s){
         return '<img class="ps ps-'+s+'" alt="" draggable="false">';}).join('')
     +'</span>';
+}
+/* [2026-10-06 新增] 宠物升级后**当场把地图上这只的尺寸刷新**。
+   不重绘整页：只改 .pmLive 的宽高（内联 style 优先级高于 .pmLive 的 74px 类规则），
+   这样「喂食 → 升级 → 立刻变大」能看出来，而不用等下次进宠物页才生效。 */
+function pmRefreshPetSize(k){
+  try{
+    const map=document.getElementById('petMap'); if(!map)return;
+    const el=document.getElementById('pmPet_'+k)||map.querySelector('.pmWalk[data-pk="'+k+'"]');
+    if(!el)return;
+    const w=el.querySelector('.pmLive'); if(!w)return;
+    const h=Math.max(6,Math.round(74*petScale(pmPetLvOf(k))));
+    w.style.width=h+'px'; w.style.height=h+'px';
+    w.dataset.lv=pmPetLvOf(k);
+  }catch(e){}
+}
+/* [2026-10-06 新增] 取某只宠物的等级（petObj.pets[k].lv，兼容裸映射） */
+function pmPetLvOf(k){
+  try{
+    if(!k) return 1;
+    if(k===(petObj&&petObj.k)&&petObj&&typeof petObj.lv==='number'&&petObj.lv>0) return petObj.lv;
+    if(petObj&&petObj.pets&&petObj.pets[k]){
+      const v=petObj.pets[k];
+      return Math.max(1,(v&&typeof v==='object')?(Number(v.lv)||1):(Number(v)||1));
+    }
+  }catch(e){}
+  return 1;
 }
 function pmPetKeys(){
   if(!petObj) return [];
@@ -10973,7 +11026,7 @@ function renderPetMain(bd){
     else if(on)btn='<button data-adopt="'+x.k+'" style="flex:none;padding:6px 10px;font-size:11.5px;font-weight:700;border-radius:10px;border:1.5px solid #4f6ef7;background:#fff;color:#4f6ef7;cursor:pointer;white-space:nowrap">领养</button>';
     else btn='<span style="font-size:10.5px;color:#b3bbcc;flex:none;white-space:nowrap">🔒 '+x.need+'</span>';
     return '<div style="display:flex;align-items:center;gap:9px;padding:9px 2px;border-bottom:1px solid #f0f3fa;opacity:'+((on||has)?1:.5)+'">'
-      +'<div class="pmDexItem" style="height:40px;flex:none;display:flex;align-items:center;justify-content:center">'+petSVG(x.k,'room')+'</div>'
+      +'<div class="pmDexItem" style="height:40px;flex:none;display:flex;align-items:center;justify-content:center">'+petSVG(x.k,'dex')+'</div>'
       +'<div style="flex:1;min-width:0;overflow:hidden">'
         +'<div style="display:flex;align-items:center;gap:6px;min-width:0">'
           +'<div style="font-size:13px;font-weight:700;color:#1f2940;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:60px">'+x.n+' '+(has?('Lv.'+has.lv):'—')+'</div>'
@@ -11120,7 +11173,7 @@ function petSwitchPanel(){
     else if(on)btn='<button data-pad="'+x.k+'" style="flex:none;padding:6px 11px;font-size:11.5px;font-weight:700;border-radius:10px;border:1.5px solid #4f6ef7;background:#fff;color:#4f6ef7;cursor:pointer;white-space:nowrap">领养</button>';
     else btn='<span style="font-size:10.5px;color:#b3bbcc;flex:none;white-space:nowrap">🔒 '+x.need+'</span>';
     return '<div style="display:flex;align-items:center;gap:9px;padding:9px 2px;border-bottom:1px solid #f0f3fa;opacity:'+((on||has)?1:.5)+'">'
-      +'<div class="pmDexItem" style="height:40px;flex:none;display:flex;align-items:center;justify-content:center">'+petSVG(x.k,'room')+'</div>'
+      +'<div class="pmDexItem" style="height:40px;flex:none;display:flex;align-items:center;justify-content:center">'+petSVG(x.k,'dex')+'</div>'
       +'<div style="flex:1;min-width:0;overflow:hidden">'
         +'<div style="display:flex;align-items:center;gap:6px;min-width:0">'
           +'<div style="font-size:13px;font-weight:700;color:#1f2940;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:60px">'+x.n+' '+(has?('Lv.'+has.lv):'—')+'</div>'
