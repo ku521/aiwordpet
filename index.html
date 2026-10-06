@@ -7673,22 +7673,36 @@ function drawCard(cb){
     x.fillText(msg.replace('：','') ,W/2,935);
   }
   // 底部（白卡下方的渐变区，白字可见）
-  x.textAlign='center';
+  // [2026-10-06 改左对齐] 原来三行是居中的（x=W/2），右侧要放两个二维码，
+  // 居中文字会压到码上（最长一行约 400px，x 175~575）。现在统一左对齐 x=80，
+  // 右侧 x=520~712 留给二维码，互不重叠。
+  x.textAlign='left';
   x.fillStyle='rgba(255,255,255,.95)';x.font='24px "Microsoft YaHei",sans-serif';
-  x.fillText(`${activePack.meta.name} · ${G1?'各关最高分':(G2?'勋章战绩':'词汇与考点')}`,W/2,1066);
+  x.fillText(`${activePack.meta.name} · ${G1?'各关最高分':(G2?'勋章战绩':'词汇与考点')}`,80,1066);
   x.fillStyle='rgba(255,255,255,.75)';x.font='21px "Microsoft YaHei",sans-serif';
-  x.fillText(`我在「AI单词闯关」坚持了 ${sw} 周 · ${ds(new Date())}`,W/2,1102);
+  x.fillText(`我在「AI单词闯关」坚持了 ${sw} 周 · ${ds(new Date())}`,80,1102);
   x.fillStyle='rgba(255,255,255,.6)';x.font='18px "Microsoft YaHei",sans-serif';
-  x.fillText('邀老师 / 同学一起打卡 · 欢迎点评',W/2,1134);
-  // 右下角线上二维码（扫码即玩，纯前端离线生成，不污染画布）
+  x.fillText('邀老师 / 同学一起打卡 · 欢迎点评',80,1134);
+  // 右下角二维码：两个**固定地址**并排（2026-10-06）
+  //   [修] 原来写的是 location.origin+'/'，双地址下两个都不对：
+  //     · ku521.github.io/aiwordpet/ → 只剩 ku521.github.io（丢了子路径，扫码 404）
+  //     · workbuddy.link/p/ZofjWD3mbOhNZhMdqJoVsh → 丢了 /p/… 短链路径
+  //   [改] 按用户要求改成**两个写死的地址各一个码**（GitHub Pages + workbuddy 短链），
+  //        地址永久稳定、不会再因部署路径变化而失效，两个渠道任扫其一都能进。
+  //        纯前端离线生成，不污染画布。
   try{
-    const qr=qrcode(0,'M');qr.addData(location.origin+'/');qr.make();
-    const n=qr.getModuleCount(),qs=82,cell=qs/n,qx=640,qy=1044;
-    x.fillStyle='#fff';rrect(x,qx-10,qy-10,qs+20,qs+46,16);x.fill();
-    x.fillStyle='#243044';
-    for(let r=0;r<n;r++)for(let cc=0;cc<n;cc++)if(qr.isDark(r,cc))x.fillRect(qx+cc*cell,qy+r*cell,cell+.5,cell+.5);
-    x.fillStyle='#5b6478';x.font='bold 15px "Microsoft YaHei",sans-serif';x.textAlign='center';
-    x.fillText('扫码即玩',qx+qs/2,qy+qs+24);
+    const _qrBox=(url,label,cx)=>{
+      const qr=qrcode(0,'M');qr.addData(url);qr.make();
+      const n=qr.getModuleCount(),qs=72,cell=qs/n;
+      const qx=Math.round(cx-qs/2),qy=1046;
+      x.fillStyle='#fff';rrect(x,qx-8,qy-8,qs+16,qs+44,14);x.fill();
+      x.fillStyle='#243044';
+      for(let r=0;r<n;r++)for(let cc=0;cc<n;cc++)if(qr.isDark(r,cc))x.fillRect(qx+cc*cell,qy+r*cell,cell+.5,cell+.5);
+      x.fillStyle='#fff';x.font='bold 13px "Microsoft YaHei",sans-serif';x.textAlign='center';
+      x.fillText(label,cx,qy+qs+24);
+    };
+    _qrBox('https://ku521.github.io/aiwordpet/','GitHub',566);
+    _qrBox('https://www.workbuddy.link/p/ZofjWD3mbOhNZhMdqJoVsh','微信',690);
   }catch(e){}
   // 头像：emoji 直接画；自定义图片异步加载后圆形裁剪绘制
   const drawAv=done=>{
