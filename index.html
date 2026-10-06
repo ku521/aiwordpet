@@ -5444,21 +5444,25 @@ function pmPetLv(p){
   }
   return 1;
 }
-/* [2026-10-06 改版 v2] 宠物尺寸 = 8 个阶梯，按用户给的表：
-     Lv1-10 → 0.1（很小的一只幼崽）    Lv11-30 → 0.3
-     Lv31-50 → 0.5                     Lv51-70 → 0.7
-     Lv71-90 → 0.9                     Lv91-100 → 1.0（= 现有大小）
-     Lv101-150 → 1.5（_linear 过渡到 1.5）
-     Lv151-200 → 2.0（最大状态，Lv200+ 不再变大，封顶防撑爆布局）
-   注意：Lv51-70 那档用户写的是「41-70」，与 31-50 有重叠，这里按不重叠取 51-70。 */
-const PET_TIERS=[[1,10,0.1],[11,30,0.3],[31,50,0.5],[51,70,0.7],
-                  [71,90,0.9],[91,100,1.0],[101,150,1.5],[151,200,2.0]];
+/* [2026-10-06 改版 v4] 宠物体型 = 8 档**绝对像素**（不再用倍数）。
+   演进过程值得留着：
+     v1 倍数制 0.1~2.0 → Lv1 只有 7px，放在大食盆旁像两只小虫子（用户看截图要求重定）
+     v2 25~120px → 25px 仍偏小（用户要求「再加一点」）
+     v3 30/40/50/60/70/80/90/120（当前）：每档差 10px 递增，Lv1=30px 与 66px 的食盆比例协调
+   两处都要接：① 地图上自由溜达的（petSVG）② 房子前探头的那只（.pmHousePet 原来被 CSS 写死 25px，
+   这是「两只宠物有一只不变大」的根因）。Lv200+ 封顶 120px 不再变大。
+   预览页 tools/pet_size_preview.html 与线上读同一份表，所见即所得。 */
+const PET_TIERS=[[1,10,30],[11,30,40],[31,50,50],[51,70,60],
+                  [71,90,70],[91,100,80],[101,150,90],[151,200,120]];
 function petTierIdx(lv){
   const n=Math.max(1,Number(lv)||1);
   for(let i=0;i<PET_TIERS.length;i++){ if(n<=PET_TIERS[i][1]) return i; }
   return PET_TIERS.length-1;          /* Lv200+ 封顶在最后一档 */
 }
-function petScale(lv){ return PET_TIERS[petTierIdx(lv)][2]; }
+/* 该等级的**目标像素**（地图上、房子前，都是它的大小） */
+function petSizePx(lv){ return PET_TIERS[petTierIdx(lv)][2]; }
+/* 兼容旧调用点（用 transform:scale 的场景）：返回相对 80px 的倍数 */
+function petScale(lv){ return petSizePx(lv)/80; }
 function petGlow(lv){
   const t=petTierIdx(lv);                 /* 0..7 档 */
   if(t<2) return '';                     /* ①② 档幼崽不带光 */
@@ -9596,7 +9600,8 @@ function pmFeedRandom(silent){
     if(!silent)pmEatReset(false);
   }catch(e){}
 }
-/* [v3.9] 🎾 抛球：球抛出去落在随机草地，宠物追过去（心情 +、偶尔掉粮） */
+/* [v3.9] ⚽ 扔玩具（2026-10-06 从「抛球」改名为「扔玩具」并换掉难认的飞碟）：
+   随机取 ⚽🏀⚽🎈🧸 五种之一扔到草地，宠物追过去（心情 +、偶尔掉粮） */
 /* [v3.10] 💧 喂水：咕嘟咕嘟喝饱（饱腹拉满 + 心情 +4）。跟 🍽 喂食的区别是「不消耗碗里的粮」，
    随时能点，所以是稳定回血的手段；喝饱后清洁不变，想让它干净还是得洗澡。 */
 function pmGiveWater(silent){
@@ -9682,25 +9687,65 @@ function pmPlayBall(){
     pmPoseAll('happy',3400);
     const one=function(i){
       if(!scr||!scr.classList.contains('active')){ pmBallSeq=0; return; }
-      /* 抛球轨迹：右下 → 空中 → 落在随机点 */
+      /* [2026-10-06 修「还是同时出现两个」] 先清场：把上一轮残留的玩具一律清掉。
+         原来靠固定毫秒数（玩具 4.6s 消失 / 下一个 5.1s 扔）来错开，但宠物走位是
+         分步动画、时长不固定（远处走 4 步、近处 1 步），实际会出现
+         「宠物还在路上 → 下一个已经飞出来了」→ 画面上两个玩具同时在。
+         现在改成**状态驱动**：每一轮开始前先清掉所有 .pmBall，
+         并且下一个要等「场上没有玩具 且 没有宠物还在赶路（_goingEat）」才抛。
+         另加 14 秒兜底，避免宠物卡住时永远等不到下一轮。 */
+      Array.prototype.forEach.call(map.querySelectorAll('.pmBall'),function(e){ e.remove(); });
+      /* 扔玩具轨迹：右下 → 空中 → 落在随机点 */
       const bx=18+Math.random()*60, by=PM_NEAR+12+Math.random()*20;
       const ball=document.createElement('div');
-      /* 2026-10-05 换配色：足球黑白在草地上看不清 → 篮球/排球/飞碟（橙白系+发光描边） */
-      ball.className='pmBall'; ball.textContent=['🏀','🏐','🥏'][Math.floor(Math.random()*3)];
+      /* [2026-10-06 换玩具] 原来随机取 ['🏀','🏐','🥏']，用户看截图说「这个是什么球？还是飞碟？看不懂」。
+         —— 🥏 飞碟又小又扁、在草地上认不出来。
+         换成 9 种一眼认得的玩具，**随机**（不再偏向某一种）：
+           球类 5 种（⚽足球 🏀篮球 🥎棒球 🏐排球 🟡黄球）—— 扔出去**边飞边转**（球在地上是滚的）
+           非球 4 种（🎈气球 🎾球拍 🧸玩偶 🪁风筝）—— **不旋转**，气球/球拍/风筝飘、玩偶静止
+         （不加骨头 🦴：宠物里没有狗，骨头对鸡兔龟熊猫龙都不合适）
+         顺带把飞行/停留时间都放长（原来 0.62s 飞、2.6s 就消失，太短看不清）：
+           飞行 0.95s、原地旋转 2.2s 一圈、停留到宠物接住（约 4.6s）才消失。 */
+      ball.className='pmBall';
+      /* 球类（转）/ 非球类（不转）：9 种随机。emoji 是内嵌字体图形，一行代码就够、不占空间 */
+      const _toy=['⚽','🏀','🥎','🏐','🟡','🎾','🎈','🧸','🪁'][Math.floor(Math.random()*9)];
+      const _isBall=('⚽🏀🥎🏐🟡'.indexOf(_toy)>=0);   /* 🥎棒球在转组；🎾球拍放不转组 */
+      ball.textContent=_toy;
+      if(!_isBall) ball.classList.add('pmToyNoSpin');   /* 气球/玩偶/风筝：不旋转 */
       ball.style.left='86%'; ball.style.bottom='14%';
       map.appendChild(ball);
       void ball.offsetWidth;
       ball.style.left=bx.toFixed(1)+'%'; ball.style.bottom=by.toFixed(1)+'%';
-      setTimeout(function(){ if(ball.isConnected) ball.remove(); },2600);
+      /* [2026-10-06] 停留时间 2.6s -> 4.6s：原来还没等宠物跑过来就没了，看着像玩具凭空消失 */
+      setTimeout(function(){ if(ball.isConnected) ball.remove(); },4600);
       Array.prototype.forEach.call(list,function(w,j){
-        setTimeout(function(){ pmPetWalkToEat(w, bx, by-4); setTimeout(function(){ pmPetReturnFromEat(w); },2400); },j*240);
+        /* [2026-10-06] 接住后停留 2.4s -> 3.6s，跟玩具在草地上的 4.6s 存在时间配套：
+           宠物接到 → 玩 3.6 秒 → 回原位，正好玩具也差不多消失，节奏才对得上 */
+        setTimeout(function(){ pmPetWalkToEat(w, bx, by-4); setTimeout(function(){ pmPetReturnFromEat(w); },3600); },j*240);
       });
       /* 2026-10-05 修「发球后院里有两个球」：这个 pmFloat('⚽') 是落点处又补画的一个
-         渐隐漂浮球特效，看起来就是"多了一个淡一点的球"。真球本身已经在飞了，删掉它。 */
+         渐隐漂浮特效，看起来就是"多了一个淡一点的球"。真球本身已经在飞了，删掉它。 */
       pmSay(i<2?'接住啦！':'接完啦！',null);
-      if(!pmIsNight())toast('🎾 第 '+(i+1)+' 球飞出去啦 · 它跑过去接（第 '+(i+1)+'/3 球）');
-      if(i<2) setTimeout(function(){ one(i+1); },3000);
-      else setTimeout(function(){ pmBallSeq=0; if(!pmIsNight())toast('🎾 连抛 3 次球 · 它追着火烧跑着接（心情 +5）'); },2800);
+      if(!pmIsNight())toast('⚽ 第 '+(i+1)+' 次扔玩具 · 它跑过去接（第 '+(i+1)+'/3 次）');
+      /* [2026-10-06 改·状态驱动串行] 原来是「固定 5100ms 后扔下一个」，
+         但宠物是分步走到玩具边的（远处 4 步、近处 1 步，耗时差好几倍），
+         固定值必然对不上 → 画面上同时出现两个玩具（用户两次反馈同一个问题）。
+         现在改成：**从宠物接到玩具那一刻开始计时**（3.6s 玩），
+         再等场上玩具已移除、且没有宠物还在赶路（_goingEat），才抛下一个。
+         14 秒兜底，万一宠物卡住也不会永远等下去。 */
+      const waitReady=function(fin){
+        const t0=Date.now();
+        const tick=function(){
+          if(!scr||!scr.classList.contains('active')){ pmBallSeq=0; return; }
+          const hasBall=map.querySelectorAll('.pmBall').length>0;
+          const busy=Array.prototype.some.call(list,function(w){ return w._goingEat||w._pose==='eat'; });
+          if((!hasBall&&!busy)||Date.now()-t0>14000){ fin(); return; }
+          setTimeout(tick,300);
+        };
+        setTimeout(tick,3800);      /* 先让宠物把玩具玩一会儿（它接到后 3.6s 左右松开） */
+      };
+      if(i<2) waitReady(function(){ one(i+1); });
+      else waitReady(function(){ pmBallSeq=0; if(!pmIsNight())toast('⚽ 连扔 3 次玩具 · 它追着玩具跑（心情 +5）'); });
     };
     one(0);
     p.mood=Math.min(100,(p.mood||60)+5); petTouch();
@@ -10202,7 +10247,7 @@ function pmEnsureStyle(){
    +'@keyframes pmLampGlow{from{box-shadow:0 0 0 rgba(255,206,110,0)}to{box-shadow:0 0 16px rgba(255,206,110,.55)}}'
    +'.pmHouse{position:absolute;right:5%;bottom:24%;font-size:86px;line-height:1;pointer-events:none;z-index:2;filter:drop-shadow(0 3px 4px rgba(0,0,0,.28))}'
    /* ④ 让自家宠物从屋里探头 */
-   +'.pmHousePet{position:absolute;right:11.6%;bottom:23.5%;width:25px;height:25px;line-height:0;z-index:3;pointer-events:none;transform-origin:50% 100%;animation:pmHousePeek 3.2s ease-in-out infinite}'
+   +'.pmHousePet{position:absolute;right:11.6%;bottom:23.5%;width:74px;height:74px;line-height:0;z-index:3;pointer-events:none;transform-origin:50% 100%;animation:pmHousePeek 3.2s ease-in-out infinite}'
    +'.pmHousePet img{width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 2px 2px rgba(0,0,0,.28))}'   +'@keyframes pmHousePeek{0%,72%,100%{transform:translateY(0) rotate(0deg)}80%{transform:translateY(-4px) rotate(-4deg)}88%{transform:translateY(-6px) rotate(3deg)}94%{transform:translateY(-2px) rotate(0deg)}}'
    +'.pmMap.night .pmHouse{filter:drop-shadow(0 0 14px rgba(255,206,110,.9)) drop-shadow(0 0 34px rgba(255,190,80,.5)) drop-shadow(0 3px 4px rgba(0,0,0,.3))}'
    +'.pmMap.night .pmHouse.lamp{animation:pmHouseGlow 2.6s ease-in-out infinite alternate}'
@@ -10289,15 +10334,20 @@ function pmEnsureStyle(){
    +'@keyframes pmUp{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-48px)}}'
    +'.pmGift{position:absolute;z-index:2;cursor:pointer;font-size:21px;animation:pmWob 1.5s infinite alternate;filter:drop-shadow(0 2px 2px rgba(0,0,0,.15))}'
    +'@keyframes pmWob{from{transform:rotate(-14deg)}to{transform:rotate(14deg)}}'
-   /* [v3.9] 抛球 / 跳舞的小特效 */
-   +'.pmBall{position:absolute;z-index:130;font-size:17px;line-height:1;pointer-events:none;transform-origin:50% 50%;'
-   +'transition:left .62s cubic-bezier(.32,0,.68,1),bottom .62s cubic-bezier(.32,0,.68,1),transform .62s ease;'
-   +'animation:pmBallSpin .62s linear infinite;filter:drop-shadow(0 4px 3px rgba(0,0,0,.25)) drop-shadow(0 0 5px rgba(255,255,255,.85))}'
+   /* [v3.9] 扔玩具 / 跳舞的小特效 */
+   +'.pmBall{position:absolute;z-index:130;font-size:25px;line-height:1;pointer-events:none;transform-origin:50% 50%;'
+   +'transition:left .95s cubic-bezier(.32,0,.68,1),bottom .95s cubic-bezier(.32,0,.68,1),transform .95s ease;'
+   +'animation:pmBallSpin 2.2s linear infinite;filter:drop-shadow(0 4px 3px rgba(0,0,0,.25)) drop-shadow(0 0 5px rgba(255,255,255,.85))}'
+   /* [2026-10-06] 非球类玩具（🎈气球 🧸玩偶）不跟着转 ——
+      球在地上是滚的，气球和玩偶转起来很怪。气球改成上下轻飘 + 左右微摆，像真的挂在空中。 */
+   +'.pmBall.pmToyNoSpin{animation:pmBallFloat 1.6s ease-in-out infinite}'
+
+   +'@keyframes pmBallFloat{0%,100%{transform:translateY(0) rotate(-7deg)}50%{transform:translateY(-7px) rotate(7deg)}}'
    +'.pmMap.night .pmBall{filter:drop-shadow(0 0 10px rgba(255,225,150,.85)) drop-shadow(0 0 4px rgba(255,255,255,.6))}'
    +'@keyframes pmBallSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}'
    +'.pmNote{position:absolute;z-index:140;font-size:17px;line-height:1;pointer-events:none;animation:pmNoteUp 1.9s ease-out forwards;text-shadow:0 1px 2px #fff}'
    +'@keyframes pmNoteUp{0%{opacity:0;transform:translateY(6px) scale(.7)}18%{opacity:1}100%{opacity:0;transform:translateY(-58px) scale(1.3) rotate(14deg)}}'
-   /* [v3.9] 地图下方一排互动按钮（喂食 / 抛球 / 跳舞 / 留念 / 哄睡） */
+   /* [v3.9] 地图下方一排互动按钮（喂食 / 扔玩具 / 跳舞 / 留念 / 哄睡） */
    /* [v3.11] 6 个互动按钮一行挤不下：改成 3 列 × 2 行铺满整宽，每颗一样大；
        「哄它早睡」地图上的 pmSleepBar 已经有了，这里不再重复放一颗 */
    +'.pmPlay{position:relative;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:8px 2px 2px}'
@@ -10428,11 +10478,10 @@ function pmPoseAll(mode,ms){
 function petSVG(k,sz){
   /* [v20] 屋里/列表里的小图标 40px（原来 52px 会顶出 40px 高的容器），地图上 74px
      [2026-10-06 修·用户报「宠物尺寸没变化，还是这么大一只」]
-     真因：地图里自由溜达的那只（.pmWalk）尺寸是**写死的 74px**，
+     真因：地图里自由溜达的那只（.pmWalk）尺寸是**写死的 74px**（房子前那只同样写死 25px），
      等级缩放 petScale() 只被我接到了「房子前那只」和「副宠物」上，散步的这只完全没接 ——
      所以截图里两只明明等级差很多，看起来一样大。
-     现在把等级缩放乘进基准尺寸：Lv1 只有 0.1 倍（约 7px 小崽），Lv100+ 逐步长到 74px。
-     取整避免 74*0.1=7.4px 这类碎值导致边缘发虚。
+     现在直接用 PET_TIERS 里的**目标像素**：Lv1=30px … Lv200+=120px。
      内联 style 优先级高于 CSS 的 .pmLive{width:74px} 类规则，所以尺寸一定生效。 */
   const base=(sz==='room')?40:74;
   /* [2026-10-06] 图鉴列表那种固定 40px 格子里不要缩放（缩了会留大片空白），
@@ -10440,7 +10489,8 @@ function petSVG(k,sz){
      sz==='dex' 表示图鉴格子，保持基准尺寸。 */
   if(sz==='dex'||sz==='room2') return petSVGBase(k,base);   /* 图鉴格子 / 屋内多只：不缩放 */
   const lv=pmPetLvOf(k);
-  const h=Math.max(6,Math.round(base*petScale(lv)));
+  /* 地图上直接用 PET_TIERS 里的目标像素（Lv1=25px … Lv200=120px） */
+  const h=petSizePx(lv);
   return petSVGBase(k,h,lv);
 }
 function petSVGBase(k,h,lv){
@@ -10455,13 +10505,26 @@ function petSVGBase(k,h,lv){
    这样「喂食 → 升级 → 立刻变大」能看出来，而不用等下次进宠物页才生效。 */
 function pmRefreshPetSize(k){
   try{
-    const map=document.getElementById('petMap'); if(!map)return;
-    const el=document.getElementById('pmPet_'+k)||map.querySelector('.pmWalk[data-pk="'+k+'"]');
-    if(!el)return;
-    const w=el.querySelector('.pmLive'); if(!w)return;
-    const h=Math.max(6,Math.round(74*petScale(pmPetLvOf(k))));
-    w.style.width=h+'px'; w.style.height=h+'px';
-    w.dataset.lv=pmPetLvOf(k);
+    const px=petSizePx(pmPetLvOf(k));
+    /* ① 地图上自由溜达的那只（.pmWalk > .pmLive） */
+    const map=document.getElementById('petMap');
+    if(map){
+      const el=document.getElementById('pmPet_'+k)||map.querySelector('.pmWalk[data-pk="'+k+'"]');
+      if(el){
+        const w=el.querySelector('.pmLive');
+        if(w){ w.style.width=px+'px'; w.style.height=px+'px'; w.dataset.lv=pmPetLvOf(k); }
+      }
+      /* ② 房子前探头的那只（.pmHousePet）—— 之前被 CSS 写死 25px 不变，
+            「两只宠物有一只不变大」就是它。这里一起刷新。 */
+      const hp=map.querySelector('.pmHousePet');
+      if(hp){
+        const pet=petEnsure();
+        if(!k||pet.k===k){
+          hp.style.width=px+'px'; hp.style.height=px+'px';
+          hp.style.filter=petGlow(pmPetLvOf(k))||'';   /* petGlow 返回的就是完整 filter 值 */
+        }
+      }
+    }
   }catch(e){}
 }
 /* [2026-10-06 新增] 取某只宠物的等级（petObj.pets[k].lv，兼容裸映射） */
@@ -10774,7 +10837,7 @@ function petDash(el,step){
   if(!el) return;
   const key=el.dataset.pk||(petObj&&petObj.k)||'chick';
   const P0=(petObj&&petObj.pets)?petObj.pets[key]:petObj;
-  /* [v3.11] 双击撒欢恢复扣 3 点心情：现在喂食 / 喂水 / 洗澡 / 抛球 / 跳舞都会往上涨，
+  /* [v3.11] 双击撒欢恢复扣 3 点心情：现在喂食 / 喂水 / 洗澡 / 扔玩具 / 跳舞都会往上涨，
      撒欢是唯一「赶走它」的动作，不变相等同于免费刷。撒完走开 + 掉 3 点，再点一下又回来。 */
   if(P0){ P0.pt=Date.now(); P0.mood=Math.max(0,(P0.mood||0)-3); saveAll(); }
   const pool=['哼……走就走！','呜呜被赶走了…','我去那边玩…','好吧我走远点…','不理你了哼！'];
@@ -11065,7 +11128,12 @@ function renderPetMain(bd){
       +'<div class="pmYard'+(pmIsDusk()?'':'')+'"></div>'
       +'<div class="pmYardPet'+((pmIsNight()||pmSleepState(p).manual||pmInsideKeys().length)?'':' style="visibility:hidden"')+'">'+petYardPetHTML()+'</div>'
       +'<div class="pmTree t1">🌳</div><div class="pmTree t2">🌳</div><div class="pmTree t3">🌲</div><div class="pmTree t4">🌳</div>'+'<div class="pmHouse'+(pmIsDusk()?' lamp':'')+'">🏠</div>'
-      +'<div class="pmHousePet"'+((pmIsNight()||pmSleepState(p).manual||pmInsideKeys().length)?'':' style="visibility:hidden"')+'><img src="'+petImgSrc(p.k)+'" alt=""></div>'
+      /* [2026-10-06 修] 房子前探头的那只原来被 CSS 写死 25px，所以「两只宠物有一只不变大」。
+         尺寸改成按等级算。注意：visibility 和宽高必须写在**同一个 style 属性**里 ——
+         写成两个 style 后浏览器只认第二个，宽高会被丢掉（这是本轮踩到的坑）。 */
+      +'<div class="pmHousePet" style="width:'+petSizePx(pmPetLv(p))+'px;height:'+petSizePx(pmPetLv(p))+'px;'
+        +((pmIsNight()||pmSleepState(p).manual||pmInsideKeys().length)?'':'visibility:hidden;')+petGlow(pmPetLv(p))+'">'
+      +'<img src="'+petImgSrc(p.k)+'" alt=""></div>'
       +'<div class="pmHouseTip">🔍 点房子看屋里</div>'
       +'<div class="pmBowl'+(pmIsDusk()?' night':'')+'" id="pmBowl" onclick="pmBowlTap()"></div>'
       +'<div class="pmFence"><i></i></div>'
@@ -11079,7 +11147,7 @@ function renderPetMain(bd){
       +'</div>'
       /* [v3.12] 6 颗互动按钮从地图下面那排挪到地图两边竖排：左边挂在 🎯签到 下面，右边挂在 🎁收礼 下面 */
       +'<div class="pmAct pmActL"><b onclick="pmFeedAct(0)">🌾<em>喂草</em></b><b onclick="pmSignAct()">🎯<em>签到</em></b><b class="pmActAdd p1" onclick="pmFeedRandom()">🍽<em>喂食</em></b><b class="pmActAdd p6" onclick="pmGiveWater()">💧<em>喂水</em></b><b class="pmActAdd p7" onclick="pmBathAll()">🛁<em>洗澡</em></b></div>'
-      +'<div class="pmAct pmActR"><b onclick="pmFeedAct(1)">🍖<em>加餐</em></b><b onclick="pmGiftAct()">🎁<em>收礼</em></b><b class="pmActAdd p2" onclick="pmPlayBall()">🎾<em>抛球</em></b><b class="pmActAdd p3" onclick="pmDanceAll()">🎪<em>跳舞</em></b><b class="pmActAdd p4" onclick="pmSnapshot()">📷<em>留念</em></b></div>'
+      +'<div class="pmAct pmActR"><b onclick="pmFeedAct(1)">🍖<em>加餐</em></b><b onclick="pmGiftAct()">🎁<em>收礼</em></b><b class="pmActAdd p2" onclick="pmPlayBall()">⚽<em>扔玩具</em></b><b class="pmActAdd p3" onclick="pmDanceAll()">🎪<em>跳舞</em></b><b class="pmActAdd p4" onclick="pmSnapshot()">📷<em>留念</em></b></div>'
       +'<div id="pmGifts"></div>'
       +'<div id="pmPet"></div>'
       +'<div id="pmBub" style="display:none;position:absolute;top:30%;left:20%;transform:translate(-50%,-100%);background:#fff;border:1.5px solid #c7d2fe;color:#4f6ef7;font-size:12px;font-weight:700;padding:6px 11px;border-radius:12px;z-index:150;max-width:80%;box-shadow:0 3px 10px rgba(79,110,247,.15);white-space:nowrap"></div>'
@@ -11087,7 +11155,7 @@ function renderPetMain(bd){
     /* [v3.12] 这排按钮已经挪到地图两边竖排了（挂在 🎯签到 / 🎁收礼 下面），这里不再重复放 */
         /* [v3.11] 底下那段长介绍整体收进「❓ 玩法说明」弹窗，页面里只留这一颗入口按钮，看着清爽 */
         +'<button class="bigBtn ghost" id="petHelpBtn3" style="width:100%;margin:7px 0 0;font-size:12px">❓ 玩法说明（单击 / 双击 / 玩具箱 / 四条进度条 / 食盆，点开看全的）</button>'
-        +'<div style="display:none">'+'🐾 <b style="color:#4f6ef7">单击=摸头</b>（它会说话、跳一下），<b style="color:#4f6ef7">双击=赶走它</b>（本来就是「把你赶走」，也就是<b style="color:#4f6ef7">驱赶</b>，它会边叫边往远处跑几步；<b style="color:#0f8a5f">心情掉 3 点</b>）；平时在草地上前后左右溜达（房子那线以下是近处、体型不变，往栅栏走才一点点缩小）；点 🥣 食盆或下面的 🌾🍖🎯🎁 都能互动；<span id="pmBowlLeft" style="color:#0f8a5f"></span>陪满 2 小时（<b style="color:#4f6ef7">跨天累计</b>）+ 心情满 100 掉 1 份 🎁，19:00～06:00 是夜景、房子自己会亮灯、<b style="color:#4f6ef7">点房子能看屋里</b>。<br><b style="color:#4f6ef7">地图下面那排是它的「玩具箱」：</b>🍽 喂食（<b>碗里有粮才管用</b>，它会跑到花园里一个随机角落低头吃，不是每次都冲到食盆）、💧 喂水（<b>不消耗碗里的粮</b>，随时能点，喝饱 + 心情 4）、🛁 洗澡（刷子搓泡泡，清洁拉满 + 心情 8）、🎾 抛球（球扔出去它追着接，心情 +5）、🎪 跳舞（蹦嚓蹦嚓，心情 +6）、📷 留念（生成一张照片卡片，可以保存下来）、😴 哄它早睡 / 🌤️ 叫醒它。'
+        +'<div style="display:none">'+'🐾 <b style="color:#4f6ef7">单击=摸头</b>（它会说话、跳一下），<b style="color:#4f6ef7">双击=赶走它</b>（本来就是「把你赶走」，也就是<b style="color:#4f6ef7">驱赶</b>，它会边叫边往远处跑几步；<b style="color:#0f8a5f">心情掉 3 点</b>）；平时在草地上前后左右溜达（房子那线以下是近处、体型不变，往栅栏走才一点点缩小）；点 🥣 食盆或下面的 🌾🍖🎯🎁 都能互动；<span id="pmBowlLeft" style="color:#0f8a5f"></span>陪满 2 小时（<b style="color:#4f6ef7">跨天累计</b>）+ 心情满 100 掉 1 份 🎁，19:00～06:00 是夜景、房子自己会亮灯、<b style="color:#4f6ef7">点房子能看屋里</b>。<br><b style="color:#4f6ef7">地图下面那排是它的「玩具箱」：</b>🍽 喂食（<b>碗里有粮才管用</b>，它会跑到花园里一个随机角落低头吃，不是每次都冲到食盆）、💧 喂水（<b>不消耗碗里的粮</b>，随时能点，喝饱 + 心情 4）、🛁 洗澡（刷子搓泡泡，清洁拉满 + 心情 8）、⚽ 扔玩具（玩具扔出去它追着接，心情 +5）、🎪 跳舞（蹦嚓蹦嚓，心情 +6）、📷 留念（生成一张照片卡片，可以保存下来）、😴 哄它早睡 / 🌤️ 叫醒它。'
         +'<div style="font-size:10.5px;color:#a7b1c6;margin-top:4px;line-height:1.7"><b style="color:#4f6ef7">左上角四条进度条（两行两列）：</b>成长（满了就升一级）、心情（<b>满 100 才掉 🎁</b>）、<b style="color:#0f9e6e">🍚 饱腹</b>（也就是「饥饿感」，条越长越不饿，约 12 小时见底）、<b style="color:#0284c7">🛁 清洁</b>（约 16 小时见底）。<b>饱腹和清洁都会按真实时间慢慢往下掉</b>，隔天回来它就是真的饿了、脏了；见底以后它会自己嘟囔「我好饿呀…」「身上黏黏的，想洗澡澡」，每分钟才掉 1 点心情，不会一下全扣光。<b>点 💧喂水 补饱腹、点 🛁洗澡 补清洁</b>，进度条会自己长上去。'+'</div>'
         +'</div>'   /* [v3.11] 折叠容器收口：两段说明都关进来，页面只留上面那颗入口按钮 */
         +'<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:8px 0 2px"><span style="font-size:11px;color:#8a95ad;font-weight:700;flex:none">🐾 切换陪伴</span>'+pmPetKeys().map(function(k){
@@ -11195,14 +11263,14 @@ function petSwitchPanel(){
 }
 /* [v3.11] 原来铺在地图下面的长段说明，全部搬进这里，由帮助弹窗折叠着展示 */
 function pmIntroHTML(){
-  return '单击=摸头（它会说话、跳一下），<b style="color:#4f6ef7">双击=赶走它</b>（本来就是「把你赶走」，也就是<b style="color:#4f6ef7">驱赶</b>：它会边叫边往远处跑几步）——<b style="color:#0f8a5f">心情扣 3 点</b>，因为现在喂食 / 喂水 / 洗澡 / 抛球 / 跳舞都会往上涨，赶走是唯一让它不高兴的动作，不扣就成免费刷了。<br>'
+  return '单击=摸头（它会说话、跳一下），<b style="color:#4f6ef7">双击=赶走它</b>（本来就是「把你赶走」，也就是<b style="color:#4f6ef7">驱赶</b>：它会边叫边往远处跑几步）——<b style="color:#0f8a5f">心情扣 3 点</b>，因为现在喂食 / 喂水 / 洗澡 / 扔玩具 / 跳舞都会往上涨，赶走是唯一让它不高兴的动作，不扣就成免费刷了。<br>'
     +'平时它在草地上前后左右溜达、<b style="color:#4f6ef7">越近越大只</b>；点 🥣 食盆或地图左右两边的 🌾🍖🎁 都能互动。<br>'
     +'<b style="color:#4f6ef7">陪满 2 小时</b>（跨天累计）+ 心情满 100 掉 1 份 🎁；19:00～06:00 是夜景、房子自己会亮灯、<b style="color:#4f6ef7">点房子能看屋里</b>。'
     +'<br><b style="color:#4f6ef7">地图两边那两竖排是它的「玩具箱」（6 颗：左边 3 颗挂在 🎯签到 下面，右边 3 颗挂在 🎁收礼 下面）：</b>'
     +'🍽 喂食（<b>碗里有粮才管用</b>，它会跑到花园里一个随机角落低头吃，不是每次都冲到食盆）、'
     +'💧 喂水（<b>不消耗碗里的粮</b>，随时能点）、'
     +'🛁 洗澡（刷子搓泡泡，泡泡贴着它身子往上冒，清洁拉满 + 心情 8）、'
-    +'🎾 抛球（<b>一次连抛 3 次</b>，球小了一圈，它追着火烧跑着接，心情 +5）、'
+    +'⚽ 扔玩具（<b>一次连扔 3 次</b>，随机一种玩具扔出去，它追着跑着接，心情 +5）、'
     +'🎪 跳舞（蹦嚓蹦嚓，心情 +6）、'
     +'📷 留念（<b>拍的就是你现在看到的这个花园</b>：院子里几只、站在哪儿、天是白天还是夜景，跟眼睛看到的一样，不是固定生成的一张图）。'
     +'<br>😴 哄睡 / 🌤️ 叫醒在地图里那条横杠上（院子右上角），玩具箱里不再重复放一颗。'
@@ -11406,7 +11474,7 @@ const NEWS_LOCAL=[
   {ver:'v3.10',kind:'fix',d:'10-04',title:'💧🛁 宠物会饿会脏了：喂水、洗澡 · 挑战赛不报错了',
    body:'左上角进度条排成两行两列，多了「🍚 饱腹（饥饿感）」和「🛁 清洁」两条，会按真实时间慢慢往下掉，饿了脏了它会自己嘟囔。玩具箱加了 💧 喂水（不花碗里的粮，随时能点）和 🛁 洗澡（刷子搓、泡泡咕嘟咕嘟冒，洗完清洁拉满）。另外修掉好友挑战偶尔弹「出错了：keys.map is not a function」，现在题目过期会直接说人话。'},
   {ver:'v3.9',kind:'feat',d:'10-04',title:'🎡 宠物玩具箱：喂食会随便找地方吃 · 升级慢下来了',
-   body:'地图下面多了一排玩具按钮：🍽 喂食（碗里有粮才管用，它会跑到花园里一个随机角落开吃，不用每次都冲到食盆）、🎾 抛球、🎪 跳舞、📷 留念（生成照片卡片能保存）、😴 哄它早睡。双击撒欢现在只是走开，心情一点不掉。升级经验整体翻倍，慢慢练、慢慢长。'},
+   body:'地图下面多了一排玩具按钮：🍽 喂食（碗里有粮才管用，它会跑到花园里一个随机角落开吃，不用每次都冲到食盆）、⚽ 扔玩具、🎪 跳舞、📷 留念（生成照片卡片能保存）、😴 哄它早睡。双击撒欢现在只是走开，心情一点不掉。升级经验整体翻倍，慢慢练、慢慢长。'},
   {ver:'v3.8',kind:'fix',d:'10-04',title:'🐞 两处小修：公告不再反复提醒 · 抢答延时卡改成本题生效',
    body:'动态广场里看过的公告会记住，刷新进来也不会再冒红点，没看过的会挂一个 NEW 标出来；限时抢答用 ⏰ 延时卡，当前这题立刻多 15 秒，不再拖到下一关才生效。'},
   {ver:'v3.6',kind:'feat',d:'10-04',title:'🐾 宠物大升级：会走路的立体小家伙',
