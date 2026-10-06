@@ -2822,6 +2822,77 @@ function cloud(){
     return Object.keys(out).length ? out : null;
   }
 
+  /* ============================================================
+     [2026-10-06 新增] 好友页合并读接口 wc_friend_page
+     ------------------------------------------------------------
+     为什么要有它：好友页一次渲染原来要串行打 4 个读请求
+       （礼物 gift_list → 在线名单 wc_players → 好友 friends_list → 挑战 duel_list），
+     而读缓存 TTL 只有 4 秒 —— 网络慢时每一步都超 4 秒、缓存永远过期，
+     每一步都在完整下载整张表（60KB × 4 次串行），用户实测一次进页要 5~6 秒。
+     现在一次拉表（load(true) 强制新鲜）把五样东西全部组装好一次性带回：
+       players（在线名单）/ social（好友+申请）/ duels（挑战）/ gifts（礼物）/ unread（角标）
+     一次渲染 = 1 次云端往返，慢网络下从 5~6 秒降到 1 次请求的时间。 */
+  H.wc_friend_page = function (b) {
+    var aid = String((b && b.p_aid) || '').trim().toUpperCase();
+    var pw = String((b && b.p_pw) || '');
+    return load(true).then(function () {
+      var r = rec(aid);
+      if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
+      if (r.pw && pw && r.pw !== pHash(pw)) return { ok: true, data: { ok: false, msg: '密码不对' } };
+      /* 脏礼物数据净化（与 wc_gift 同款）：改了就先落盘再重来一次 */
+      if (giftMigrate(r)) return save(r).then(function () { return H.wc_friend_page(b); });
+      var me = aid;
+
+      /* ① 全班名单 + 在线状态（与 wc_players 完全同款） */
+      var players = list().map(function (rr) {
+        return {
+          acc_id: rr.aid, name: rr.name, av: rr.av, on: online(rr),
+          ts: rr.hb || 0, hidden: !!rr.p_hidden, exp: Number(rr.p_exp) || 0,
+          created: rr.created || '', updated: rr.updated || ''
+        };
+      }).filter(function (x) { return !x.hidden; });
+
+      /* ② 我的好友 + 收到的申请（与 friends_list 完全同款） */
+      var s = socOf(r);
+      var social = { friends: s.fr.slice(), in: s.in.slice(), out: (s.out || []).slice() };
+
+      /* ③ 挑战列表（与 duel_list 完全同款：双方记录去重、7 天过期） */
+      var seenD = {}, duels = [];
+      for (var kk in _T.t) {
+        if (!Object.prototype.hasOwnProperty.call(_T.t, kk)) continue;
+        var rr2 = _T.t[kk];
+        var dd = rr2.soc && rr2.soc.duel;
+        if (!dd) continue;
+        for (var did2 in dd) {
+          var d0 = dd[did2];
+          if (!d0 || (d0.a !== me && d0.b !== me)) continue;
+          if (d0.exp && now() > d0.exp) continue;
+          if (seenD[did2] && !(seenD[did2].st === 'wait' && d0.st === 'done')) continue;
+          seenD[did2] = d0;
+          duels.push(duelView(d0, me));
+        }
+      }
+      duels.sort(function (x, y) { return (x.st === y.st) ? 0 : (x.st === 'wait' ? -1 : 1); });
+
+      /* ④ 收到的礼物 + ⑤ 角标（与 gift_list / unread 完全同款） */
+      var box = giftBox(r).box;
+      var gifts = box.filter(function (g) { return g && !g.taken; })
+        .map(function (g) {
+          return { id: Number(g.id), kind: g.kind, n: g.n, a: g.a, ts: g.ts, body: g.body || '' };
+        });
+      var reqs = (r.soc ? (r.soc.in || []).length : 0) + (r.soc ? (r.soc.out || []).length : 0);
+
+      return {
+        ok: true, data: {
+          ok: true, data: {
+            players: players, social: social, duels: duels, gifts: gifts,
+            unread: { gifts: box.filter(function (g) { return g && !g.taken; }).length, reqs: reqs }
+          }
+        }
+      };
+    }).catch(function (e) { return { ok: true, data: { ok: false, msg: '读取失败：' + ((e && e.message) || e) } }; });
+  };
+
   H.wc_admin2 = function (b) {
     var pw = String((b && b.p_admin) || '');
     var act = String((b && b.p_action) || '');
@@ -2927,9 +2998,15 @@ function cloud(){
          导致后台删人看起来像「功能没做」而不是「号已经没了」，排查方向全错。 */
       var tgt = String((b && b.p_aid) || '').trim();
       if (tgt && !r) return { ok: true, data: { ok: false, msg: '账号不存在（已经删过，或账号只能是字母+数字）' } };
-      if (act === 'reset_pw' && r) { r.pw = pHash(String((b && b.p_val) || '')); touch(r); return save(r); }
-      if (act === 'ban' && r) { r.banned = !!b.p_val; touch(r); return save(r); }
-      if (act === 'del' && r) { return del(r.aid); }
+      /* [2026-10-06 修「不支持的管理操作: resetpw」] 前端管理面板（admForm）发的动作名是
+         resetpw / unban / delete，后端原来只认 reset_pw / ban / del —— 名字对不上，
+         全部落到末尾报「不支持的管理操作」。这是前端和后端各写各的、没对过接口造成的。
+         现在两边的名字都收（前端不用改），另外修一个连带 bug：
+         ban 原来用 !!b.p_val 判断，但面板点「封禁」时 p_val 是 null → banned 永远是 false，
+         封禁从来没有真正生效过；改成按动作名决定开关。 */
+      if ((act === 'reset_pw' || act === 'resetpw') && r) { r.pw = pHash(String((b && b.p_val) || '')); touch(r); return save(r); }
+      if ((act === 'ban' || act === 'unban') && r) { r.banned = (act === 'ban'); touch(r); return save(r); }
+      if ((act === 'del' || act === 'delete') && r) { return del(r.aid); }
       if (act === 'exp_set' && r) { r.p_exp = Number(b.p_val) || 0; touch(r); return save(r); }
       /* 后台改昵称（管理面板「修改昵称」按钮 → action='setname'）。
          以前这里缺这个分支，点了永远提示「不支持的管理操作」，用户以为改昵称功能坏了。 */
@@ -3225,6 +3302,7 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
 
 
 
@@ -7937,8 +8015,6 @@ async function renderFriendPageInner(seq){
   const lk=cloudLink();
   if(!lk){ w.innerHTML='<div style="text-align:center;padding:24px 10px"><div style="font-size:40px">👥</div><div style="font-size:14px;color:#55617c;margin:10px 0;line-height:1.8">加好友、发消息、打挑战赛<br>需要先登录云端账号</div><button class="bigBtn" id="frGoLogin" style="max-width:220px;margin:0 auto;display:block">去登录 / 注册</button></div>'; $('#frGoLogin').onclick=()=>{renderLogin();go('scr-login')}; return; }
   pmGiftPollUnread();
-  /* 进好友页先把未读角标核一遍（别人刚送的礼物要能立刻看到） */
-  await pmGiftLoadMine();
   if(seq!==_frSeq)return;
   if(_chatWith){ await frRenderChat(); return; }
   if(seq!==_frSeq)return;
@@ -7948,11 +8024,36 @@ async function renderFriendPageInner(seq){
      页面就永远停在「正在加载…」（切走再切回来必现，只能刷新） */
   try{ w._lh=null; }catch(e){}
   w.innerHTML='<div style="text-align:center;padding:24px;color:#8a95ad;font-size:13px">正在加载…</div>';
-  const [pm, ]=[await fetchPlayers()];
-  if(seq!==_frSeq)return;
-  await loadFriends();
-  if(seq!==_frSeq)return;
-  const dr=await soci('duel_list');
+  /* [2026-10-06 提速] 一次请求拿全：在线名单+好友+申请+挑战+礼物 合并接口。
+     以前串行打 4 个读请求，慢网络下每步都超过 4 秒 TTL → 4 次整表下载，进页实测 5~6 秒；
+     现在 1 次往返出整页。合并接口不可用时（浏览器还在跑旧云层）自动回落老路径。 */
+  let pm=null, dr=null;
+  try{
+    const fp=await rpc('wc_friend_page',{p_aid:lk.aid,p_pw:lk.pw});
+    if(seq!==_frSeq)return;
+    const d=(fp&&fp.ok&&fp.data&&fp.data.ok)?(fp.data.data||null):null;
+    if(d&&Array.isArray(d.players)){
+      const map={}; d.players.forEach(p=>{map[p.acc_id]=p});
+      pm=map; _plMap=map; _plTs=Date.now(); notePresence(d.players);
+      const so=d.social||{};
+      friendIds=(Array.isArray(so.friends)?so.friends:[]).map(x=>x&&(x.id||x)).filter(Boolean);
+      frReq=Array.isArray(so.in)?so.in:[];
+      _friendLoaded=true;
+      if(Array.isArray(d.gifts)){ _giftList=d.gifts; _pmGiftSig=d.gifts.map(g=>g.id).join(','); pmGiftBadgeSet(_giftList.length); }
+      dr={ok:true,data:{ok:true,data:Array.isArray(d.duels)?d.duels:[]}};
+    }
+  }catch(e){}
+  if(!dr){
+    await pmGiftLoadMine();
+    if(seq!==_frSeq)return;
+    const [pm0]=[await fetchPlayers()];
+    if(seq!==_frSeq)return;
+    await loadFriends();
+    if(seq!==_frSeq)return;
+    dr=await soci('duel_list');
+    if(seq!==_frSeq)return;
+    pm=pm0;
+  }
   if(seq!==_frSeq)return;
   /* [v18] 服务端偶尔会把 duel_list 返回成对象而不是数组，直接 slice 会整个页面白在这儿，
      统一兜成数组，脏数据也不影响出页面 */
