@@ -2243,9 +2243,37 @@ function cloud(){
      云端按当前健康顺序逐个试 —— **第一个写成功就算完事**，
      剩下的备库在后台慢慢补，不拖慢页面（这是「流畅」的关键：
      不能让用户等两个后端都写完才看到反馈）。 */
-  function commit() {
+    /* [2026-10-06 事故修复·加写前保护] 记���已知的健康规模（账号数）。
+     用途：写云端之前拿它当基准做「规模骤降」检测。 */
+  var _peakAccounts = 0;
+
+function commit() {
     var data = _T;
     if (!data) return Promise.resolve(false);
+
+    /* ---------- 写前保护（v34 数据事故的直接对策）----------
+       事故：v34 的 load() 读失败时把内存表清成 {v:1,t:{}}，
+             紧接着这里的 commit() 把这张**空表整表写回云端**，
+             18 个账号的真实数据被覆盖成只剩 1 个管理员号。
+       两道闸，任何一道命中都**拒绝写云端**（本机照写，离线也能玩）：
+         ① 空表闸：一个账号都没有 —— 绝不可能是正常状态；
+         ② 规模骤降闸：账号数不到已知峰值的一半 —— 典型的「读失败误覆盖」特征。 */
+    var accN = 0;
+    try { accN = (data && data.t) ? Object.keys(data.t).length : 0; } catch (e) { accN = 0; }
+    if (accN > _peakAccounts) _peakAccounts = accN;
+    if (accN === 0) {
+      /* 本机仍要写（离线可玩），但**绝不**写云端 */
+      try { localWrite(data); } catch (e) { }
+      _kvWarn.writeEmpty = '内存表是空的，已跳过云端写入（避免覆盖真实数据）';
+      return Promise.resolve(false);
+    }
+    if (_peakAccounts >= 4 && accN * 2 < _peakAccounts) {
+      try { localWrite(data); } catch (e) { }
+      _kvWarn.writeShrink = '账号数从 ' + _peakAccounts + ' 降到 ' + accN +
+        '，疑似读失败导致整表缩减，已跳过云端写入';
+      return Promise.resolve(false);
+    }
+
     localWrite(data);
     /* [2026-10-06 修·实测] 原来每次保存都会遍历**所有**后端写一遍，
        包括早就 403 失效的 jsonbin —— 用户控制台里满屏都是
@@ -2291,7 +2319,17 @@ function cloud(){
        在没有数据丢失的前提下，它凭空制造了覆盖窗口 —— 净负面效果，已撤掉。
        真正保护数据一致性的机制是：**所有写类动作在改数据前强制 loadWithRetry(true)
        重新拉最新**，而不是在这里事后打补丁。 */
-    return tryWrite(0).then(function () { return true; });
+    return tryWrite(0).then(function (okw) {
+      /* [2026-10-06] 写成功了，把「已知健康规模」更新成刚写出去的这份。
+         下一�� commit 拿它当基准做规模骤降检测。 */
+      try {
+        if (okw && _T && _T.t) {
+          var n = Object.keys(_T.t).length;
+          if (n > _peakAccounts) _peakAccounts = n;
+        }
+      } catch (e) { }
+      return true;
+    });
   }
   /* 心跳：把 on 状态写进表（顺便刷新 updated） */
   function touch(rec) {
@@ -3447,6 +3485,9 @@ function cloud(){
       np: { on: !blank(KVCFG.np.url), url: KVCFG.np.url || '' },
       warn: _kvWarn,
       stale: !!_stale,
+      accountsNow: (_T && _T.t) ? Object.keys(_T.t).length : 0,
+      peakAccounts: _peakAccounts,
+      writeBlocked: !!(_kvWarn.writeEmpty || _kvWarn.writeShrink),
       accounts: (_T && _T.t) ? Object.keys(_T.t).length : null
     };
   }
@@ -3689,6 +3730,7 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
 
 
 
