@@ -1572,7 +1572,7 @@ function cloud(){
   var ADMIN = {
     aid: 'ABC123',
     pw: 'AA2026123',
-    exp: 80000,                                    // LVTAB 末位 → Lv.23（满级 / 至尊学霸）
+    exp: 999999,                                   // LVTAB 末位 = 999999 → Lv.60 满级（真理之上）
     name: '开发者',
     av: '🛡️'
   };
@@ -2214,6 +2214,15 @@ function cloud(){
       var seeded = false;
       try {
         if (!t.t[ADMIN.aid]) { t.t[ADMIN.aid] = adminSeed(); seeded = true; }
+        else {
+          /* [2026-10-06 v39] 经验表重划后末位是 999999，而管理员号是早先按旧表播的种
+             （p_exp=80000 → 现在只到 Lv.19），后台/福利入口本身不受影响，但展示上
+             「开发者」不再是满级，看着像掉级。只补到末位，不碰其他任何字段。 */
+          try {
+            var _a=t.t[ADMIN.aid];
+            if (_a && Number(_a.p_exp||0) < LVTAB[LVTAB.length-1]) { _a.p_exp = LVTAB[LVTAB.length-1]; seeded = true; }
+          } catch (e) { }
+        }
       } catch (e) { }
       /* 只配了主库（没备库可补）时，种子得自己写下去，否则管理员号只在内存里 */
       if ((tsCfgReady() || sbCfgReady()) && !jbCfgReady() && !npCfgReady()) {
@@ -5708,7 +5717,7 @@ function showEye(kind,onDone){
    每次改表都给老账号补一次「本级起点经验」→ 等级不变、级内进度比例不变。 */
 const LV_OLD=[0,60,150,280,450,680,980,1350,1800,2400,3200,4200,5400,6800,8500,10500,13000,16000,19500,23500,28000,33000,40000];
 const LV_V2=[0,60,150,280,450,680,980,1350,1800,2400,3200,4200,5400,6800,8500,10500,13000,16000,19500,23500,28000,33000,40000];
-const LVTAB=[0,240,600,1120,1800,2720,3920,5400,7200,9600,12800,16800,21600,27200,34000,42000,52000,64000,78000,94000,134000,184800,248776,328826,428487,552073,704847,893231,1125059,1409889,1759381,2187761,2712384,3354424,4139712,5099763,6273025,7706404,9457126,11595006,14205219,17391678,21281157,26028321,31821861,38891979,47519522,58047124,70892798,86566520,105690460,129023666,157492177,192225760,234602731,286304635,349382957,426340509,520230722,634778781,774529412];
+const LVTAB=[0,240,600,1120,1800,2720,3920,5400,7200,9600,12800,16800,21600,27200,34000,42000,52000,64000,78000,94000,110300,126900,143900,161200,178800,196700,215000,233600,252500,271700,291300,311200,331400,351900,372800,394000,415500,437300,459500,482000,504800,527900,551400,575200,599300,623700,648500,673600,699000,724700,750800,777200,803900,830900,858300,886000,914000,942300,971000,999999];
 /* 一次性补偿：老 exp + 当前等级的旧起点 → 等级、级内进度都不变 */
 function expDoubleMigrate(){
   try{
@@ -5731,10 +5740,29 @@ function lvQuadMigrate(){
     store.set('exp',exp); store.set('lvQuad','1');
   }catch(e){}
 }
+/* 经验数字显示：过万用「万」、过亿用「亿」，避免长数字撑破卡片格子 */
+function fmtExpN(n){
+  n=Number(n)||0;
+  const neg=n<0; n=Math.abs(n);
+  let out;
+  if(n>=100000000) out=(n/100000000).toFixed(2).replace(/\.00$/,'').replace(/(\.\d)0$/,'$1')+' 亿';
+  else if(n>=10000)  out=(n/10000).toFixed(1).replace(/\.0$/,'')+' 万';
+  else              out=String(Math.floor(n));
+  return (neg?'-':'')+out;
+}
+/* [2026-10-06 重划经验表] 末位 = 999999（原来 7.7 亿，太离谱）。
+   满级（Lv.60）后：经验继续往上加，**等级 / 称号 / 勋章一律不再变化**，
+   所以这里把 maxed 明确标出来：进度条走满、next 不再指向不存在的下一级。 */
 function lvInfo(e){
+  e=Number(e)||0;
   let i=0;while(i+1<LVTAB.length&&e>=LVTAB[i+1])i++;
-  const base=LVTAB[i],next=(i+1<LVTAB.length)?LVTAB[i+1]:Math.round(base*1.25);
-  return {lv:i+1,base,next,cur:e-base,need:Math.max(1,next-base),pct:Math.min(1,(e-base)/Math.max(1,next-base))};
+  const maxed=(i>=LVTAB.length-1);
+  const base=LVTAB[i],next=maxed?base:LVTAB[i+1];
+  return {lv:i+1,base,next,maxed:maxed,
+    cur:e-base,
+    need:maxed?1:Math.max(1,next-base),
+    pct:maxed?1:Math.min(1,(e-base)/Math.max(1,next-base)),
+    over:maxed?(e-base):0};
 }
 /* [2026-10-06] 头衔表扩到 60 级：1-23 级保持原来的名字不变，24 级起进入高阶段（对应新经验表 20 级后的高阶爬升），头衔一档比一档「贵」。 */
 const TITLES=['英语新星', '单词新手', '勤学者', '单词达人', '语法新秀', '单词能手',
@@ -6086,8 +6114,10 @@ function renderHome(){
   const sw=streakWeeks();
   $('#uMeta').textContent=`Lv.${li.lv} ${titleOf(li.lv)} · 🔥 连续 ${sw} 周`;
   $('#expFill').style.width=(li.pct*100)+'%';
-  $('#expA').textContent=exp+' EXP';
-  $('#expB').textContent=(exp>=LVTAB[LVTAB.length-1])?'已满级 🏆':`距 ${li.lv+1} 级还需 ${Math.max(0,li.need-li.cur)}`;
+  $('#expA').textContent=fmtExpN(exp)+' EXP';
+  $('#expB').textContent=li.maxed
+    ? ('已满级 🏆 Lv.'+li.lv+'（经验继续累积，称号与勋章保持不变）')
+    : ('距 '+(li.lv+1)+' 级还需 '+fmtExpN(Math.max(0,li.need-li.cur))+' EXP');
 
   const wk=weekKey(new Date()),cells=weekCells(wk),names=['一','二','三','四','五','六','日'];
   $('#wkRow').innerHTML=cells.map((d,i)=>{
@@ -7665,18 +7695,19 @@ function rulesHTML(){
      现在改成：**只有最后一个等级**才标「已满级」，其余一律显示真实数值；
      数字过万加千分位（123,456）更好读，也用中文单位缩写（万/亿）避免太长撑破格子。 */
   const _lvMax=LVTAB.length-1;
+  /* 等级表里的门槛值一律用**精确数字 + 千分位**：
+     末级 999999 如果按「万」缩写会显示成「100 万」，读起来像 1,000,000，差了一个量级。 */
   const fmtExp=(n)=>{
     n=Number(n)||0;
     if(n>=100000000) return (n/100000000).toFixed(2).replace(/\.00$/,'')+' 亿';
-    if(n>=10000)     return (n/10000).toFixed(1).replace(/\.0$/,'')+' 万';
-    return String(n);
+    return String(Math.floor(n)).replace(/\B(?=(\d{3})+(?!\d))/g,',');
   };
   let lvRows='';
   for(let i=0;i<TITLES.length;i++){
     const lv=i+1, need=LVTAB[i], ti=tierOf(lv);
     lvRows+=`<div class="lvCell"><span class="lvBadge" style="background:${TIER_COLORS[ti]}">Lv.${lv}</span>`
       +`<span class="lvTitle">${TITLES[i]}</span>`
-      +`<span class="lvNeed">${i>=_lvMax?'已满级':fmtExp(need)+' EXP'}</span>`
+      +`<span class="lvNeed">${i>=_lvMax?(fmtExp(need)+' EXP · 满级'):fmtExp(need)+' EXP'}</span>`
       +`<span class="lvTier" style="color:${TIER_COLORS[ti]}">${TIER_NAMES[ti]}勋章</span></div>`;
   }
   let medalCells='';
@@ -7711,6 +7742,9 @@ function rulesHTML(){
     </div>
 
     <div class="ruleSub">④ 进阶划分表（共 ${LVTAB.length} 级，达到对应累计经验即升级）</div>
+    <div style="font-size:12px;color:#55617c;line-height:1.8;margin:-2px 0 8px">
+      满级需要 <b>${fmtExp(LVTAB[_lvMax])}</b> 累计经验。达到满级后<b>经验还会继续往上加</b>，
+      但等级、称号、勋章都<b>不再变化</b>——继续练只是把履历数字堆得更高，不会解锁新档位。</div>
     <div class="lvGrid">${lvRows}</div>
 
     <div class="ruleSub">⑤ 所有等级对应勋章（激活图）</div>
@@ -8050,11 +8084,10 @@ function drawCard(cb){
   });
   x.globalAlpha=1;
   // 白色卡片
-  /* [2026-10-06] 白卡原来 rrect(50,150,W-100,H-300)：左右留白 50px、上下 150px，
-     上下比左右宽 3 倍，看起来「太高、很挤」。用户要求四边等距：
-     取左右 50、上下 100（白卡本身内容所需），让框看起来更方正、不那么瘦高。
-     底下留 100 给那三行文字（1060~1170）和贴两侧的二维码。 */
-  x.fillStyle='#fff';rrect(x,50,100,W-100,H-200,38);x.fill();
+  /* [2026-10-06 v39 重排] 白卡 50,80 → 700,1060。
+     底下 1060~1180 整条**只留给二维码**：三行说明文字挪进卡内（1000/1026/1052），
+     从此「文字被二维码压住」这个老问题在结构上消失，不再靠调坐标赌。 */
+  x.fillStyle='#fff';rrect(x,50,80,W-100,1000,38);x.fill();
   const u=USERS.find(xx=>xx.id===UID)||{name:'同学',av:'🐣'};
   const li=lvInfo(exp),acc=stats.ans?Math.round(stats.ok/stats.ans*100):0;
   const starT=prog.stars.reduce((a,b)=>a+b,0),mst=masteredCnt(),sw=streakWeeks();
@@ -8064,12 +8097,12 @@ function drawCard(cb){
   // 第一行：头像 + 昵称（Lv·称号作副行）
   let avP=null;
   if(G1||G2){
-    avP={x:132,y:216,r:42,fs:40};
+    avP={x:132,y:196,r:42,fs:40};
     x.textAlign='left';
-    x.fillStyle='#243044';x.font='bold 38px "Microsoft YaHei",sans-serif';x.fillText(u.name,192,208);
-    x.fillStyle=sk[0];x.font='22px "Microsoft YaHei",sans-serif';x.fillText(`Lv.${li.lv} · ${titleOf(li.lv)}`,192,242);
+    x.fillStyle='#243044';x.font='bold 38px "Microsoft YaHei",sans-serif';x.fillText(u.name,192,188);
+    x.fillStyle=sk[0];x.font='22px "Microsoft YaHei",sans-serif';x.fillText(`Lv.${li.lv} · ${titleOf(li.lv)}`,192,222);
   }else{
-    avP={x:W/2-158,y:252,r:56,fs:52};
+    avP={x:W/2-158,y:236,r:56,fs:52};
     x.textAlign='left';
     x.fillStyle='#243044';x.font='bold 48px "Microsoft YaHei",sans-serif';x.fillText(u.name,avP.x+78,avP.y-8);
     x.fillStyle=sk[0];x.font='26px "Microsoft YaHei",sans-serif';x.fillText(`Lv.${li.lv} · ${titleOf(li.lv)}`,avP.x+78,avP.y+36);
@@ -8079,12 +8112,12 @@ function drawCard(cb){
   if(G1){
     /* ===== 关卡得分版：小勋章 + 各关获分条 ===== */
     x.font='32px "Segoe UI Emoji","Apple Color Emoji"';
-    x.fillText('★'.repeat(stN)+'☆'.repeat(5-stN),W/2,298);
+    x.fillText('★'.repeat(stN)+'☆'.repeat(5-stN),W/2,268);
     x.fillStyle='#243044';x.font='bold 27px "Microsoft YaHei",sans-serif';
-    x.fillText('各关获分情况',W/2,512);
+    x.fillText('各关获分情况',W/2,480);
     const maxB=Math.max.apply(null,prog.best.slice(0,LEVELS.length).concat([1]));
     LEVELS.forEach((L,i)=>{
-      const cy=540+i*42,best=prog.best[i]||0,s=Math.min(3,prog.stars[i]||0);
+      const cy=510+i*43,best=prog.best[i]||0,s=Math.min(3,prog.stars[i]||0);
       if(i%2===1){x.fillStyle='#f8faff';rrect(x,74,cy-3,602,38,12);x.fill()}
       // 关卡名
       x.textAlign='left';x.fillStyle='#55617c';x.font='18px "Microsoft YaHei",sans-serif';
@@ -8106,24 +8139,24 @@ function drawCard(cb){
     });
     const sumBest=prog.best.reduce((a,b)=>a+(b||0),0);
     x.textAlign='center';
-    x.fillStyle='#ffe9c7';rrect(x,100,972,W-200,44,22);x.fill();
+    x.fillStyle='#ffe9c7';rrect(x,100,940,W-200,44,22);x.fill();
     x.fillStyle='#a75a00';x.font='bold 22px "Microsoft YaHei",sans-serif';
-    x.fillText(`总星 ${starT} · 总分 ${sumBest} · 连续打卡 ${sw} 周`,W/2,1001);
+    x.fillText(`总星 ${starT} · 总分 ${sumBest} · 连续打卡 ${sw} 周`,W/2,969);
   }else if(G2){
     /* ===== 勋章墙版：本账号已获得的所有勋章 ===== */
     x.font='32px "Segoe UI Emoji","Apple Color Emoji"';
-    x.fillText('★'.repeat(stN)+'☆'.repeat(5-stN),W/2,298);
+    x.fillText('★'.repeat(stN)+'☆'.repeat(5-stN),W/2,268);
     x.fillStyle='#243044';x.font='bold 27px "Microsoft YaHei",sans-serif';
-    x.fillText('🏅 已点亮 '+gotN+' / '+MEDALS.length+' 枚勋章',W/2,346);
-    x.fillStyle='#ffe9c7';rrect(x,100,972,W-200,44,22);x.fill();
+    x.fillText('🏅 已点亮 '+gotN+' / '+MEDALS.length+' 枚勋章',W/2,316);
+    x.fillStyle='#ffe9c7';rrect(x,100,940,W-200,44,22);x.fill();
     x.fillStyle='#a75a00';x.font='bold 22px "Microsoft YaHei",sans-serif';
-    x.fillText('当前 Lv.'+li.lv+' '+titleOf(li.lv)+' · 连续打卡 '+sw+' 周',W/2,1001);
+    x.fillText('当前 Lv.'+li.lv+' '+titleOf(li.lv)+' · 连续打卡 '+sw+' 周',W/2,969);
   }else{
     x.font='40px "Segoe UI Emoji","Apple Color Emoji"';
-    x.fillText('★'.repeat(stN)+'☆'.repeat(5-stN),W/2,376);
+    x.fillText('★'.repeat(stN)+'☆'.repeat(5-stN),W/2,320);
     // 数据格子
-    const boxes=[['累计答题',stats.ans],['正确率',acc+'%'],['已掌握',mst],['星星',starT],['🔥连续周',sw],['经验',exp]];
-    const bx=100,by=622,bw=155,bh=104,gap=23;
+    const boxes=[['累计答题',stats.ans],['正确率',acc+'%'],['已掌握',mst],['星星',starT],['🔥连续周',sw],['经验',fmtExpN(exp)]];
+    const bx=100,by=600,bw=155,bh=104,gap=23;
     boxes.forEach((b,i)=>{
       const cx=bx+(i%3)*(bw+gap),cy=by+Math.floor(i/3)*(bh+gap);
       x.fillStyle='#f4f7fd';rrect(x,cx,cy,bw,bh,20);x.fill();
@@ -8133,21 +8166,21 @@ function drawCard(cb){
       x.fillText(b[0],cx+bw/2,cy+86);
     });
     // 宣言
-    x.fillStyle='#ffe9c7';rrect(x,100,878,W-200,92,22);x.fill();
+    x.fillStyle='#ffe9c7';rrect(x,100,850,W-200,92,22);x.fill();
     x.fillStyle='#a75a00';x.font='bold 26px "Microsoft YaHei",sans-serif';
     const msg=acc>=90?'稳如老狗，这份正确率可以直接 miss：':acc>=75?'状态在线，继续保持这个节奏 💪':'每天都在进步，坚持就是超能力 🔥';
-    x.fillText(msg.replace('：','') ,W/2,935);
+    x.fillText(msg.replace('：','') ,W/2,907);
   }
-  // 底部（白卡下方的渐变区，白字可见）
-  // [2026-10-06 调整] 白卡变矮后（底边 1080），三行文字整体下移；
-  // 二维码已移到**左右两侧**，中间不再有东西，所以文字回到**居中**排版（更平衡）。
+  /* [2026-10-06 v39 二轮] 二维码搬进白卡后，渐变底区 1080~1180 **只剩文字**，
+     白字白底可读，也再没有第二样东西跟它抢位置（v39 一轮把文字放进卡内、
+     二维码留在底区，结果二维码按 41 模块算出来会掉出画布；现在两层彻底分开）。 */
   x.textAlign='center';
   x.fillStyle='rgba(255,255,255,.95)';x.font='24px "Microsoft YaHei",sans-serif';
-  x.fillText(`${activePack.meta.name} · ${G1?'各关最高分':(G2?'勋章战绩':'词汇与考点')}`,W/2,1096);
+  x.fillText(`${activePack.meta.name} · ${G1?'各关最高分':(G2?'勋章战绩':'词汇与考点')}`,W/2,1110);
   x.fillStyle='rgba(255,255,255,.75)';x.font='21px "Microsoft YaHei",sans-serif';
-  x.fillText(`我在「AI单词闯关」坚持了 ${sw} 周 · ${ds(new Date())}`,W/2,1132);
+  x.fillText(`我在「AI单词闯关」坚持了 ${sw} 周 · ${ds(new Date())}`,W/2,1142);
   x.fillStyle='rgba(255,255,255,.6)';x.font='18px "Microsoft YaHei",sans-serif';
-  x.fillText('邀老师 / 同学一起打卡 · 欢迎点评',W/2,1162);
+  x.fillText('邀老师 / 同学一起打卡 · 扫码进「AI单词闯关」',W/2,1170);
   // 右下角二维码：两个**固定地址**并排（2026-10-06）
   //   [修] 原来写的是 location.origin+'/'，双地址下两个都不对：
   //     · ku521.github.io/aiwordpet/ → 只剩 ku521.github.io（丢了子路径，扫码 404）
@@ -8156,21 +8189,28 @@ function drawCard(cb){
   //        地址永久稳定、不会再因部署路径变化而失效，两个渠道任扫其一都能进。
   //        纯前端离线生成，不污染画布。
   try{
-    const _qrBox=(url,label,cx)=>{
+    /* [2026-10-06 v39 二轮] 用户要求：**正方形、不要多余的背景框**。
+       · 白底方块画在**白卡上** → 和卡片同色，等于没有框（第一版那个「圆角矩形 + 标签底板」
+         的竖条彻底去掉）；
+       · 边长按模块数自适应：cell = clamp(floor(84/(n+4)), 2, 6)，任何长度的网址都不会
+         撑出画布（第一轮固定 cell=4，41 模块的码会到 1240px，直接被裁掉）；
+       · 两个码并排居中，位置 986~1070（卡内底部，三个版式一致）。 */
+    const _qrBox=(url,cx)=>{
       const qr=qrcode(0,'M');qr.addData(url);qr.make();
-      const n=qr.getModuleCount(),qs=72,cell=qs/n;
-      const qx=Math.round(cx-qs/2),qy=1040;
-      x.fillStyle='#fff';rrect(x,qx-8,qy-8,qs+16,qs+44,14);x.fill();
+      const n=qr.getModuleCount();
+      const cell=Math.max(2,Math.min(6,Math.floor(84/(n+4))));
+      const boxS=(n+4)*cell, by=1070-boxS;                      /* 底边对齐 1070 */
+      x.fillStyle='#fff';x.fillRect(Math.round(cx-boxS/2),by,boxS,boxS);   /* 正方形，no圆角 */
       x.fillStyle='#243044';
-      for(let r=0;r<n;r++)for(let cc=0;cc<n;cc++)if(qr.isDark(r,cc))x.fillRect(qx+cc*cell,qy+r*cell,cell+.5,cell+.5);
-      x.fillStyle='#fff';x.font='bold 13px "Microsoft YaHei",sans-serif';x.textAlign='center';
-      x.fillText(label,cx,qy+qs+24);
+      const qx=Math.round(cx-(n*cell)/2),qy=by+cell*2;
+      for(let r=0;r<n;r++)for(let cc=0;cc<n;cc++)if(qr.isDark(r,cc))x.fillRect(qx+cc*cell,qy+r*cell,cell,cell);
     };
     /* [2026-10-06] 两个码**左右分开**，分别贴卡片左右两侧。
        原来两个都挤在右下角（x=566/690），标签也糊在一起看不清；
        现在一个贴左、一个贴右，中间的标题/日期/邀请语不受影响。 */
-    _qrBox('https://ku521.github.io/aiwordpet/','GitHub',104);
-    _qrBox('https://www.workbuddy.link/p/ZofjWD3mbOhNZhMdqJoVsh','微信/浏览器',W-104);
+    /* 两个码并排居中（不再一左一右贴边，也不再画标签底板） */
+    _qrBox('https://ku521.github.io/aiwordpet/',W/2-56);
+    _qrBox('https://www.workbuddy.link/p/ZofjWD3mbOhNZhMdqJoVsh',W/2+56);
   }catch(e){}
   // 头像：emoji 直接画；自定义图片异步加载后圆形裁剪绘制
   const drawAv=done=>{
@@ -8199,18 +8239,23 @@ function drawCard(cb){
        ① 图索引改用 m.tier（段位序号 0-14）直取 —— 以前 Math.min(8,tierOf(lv))
           把档位硬卡在 8，超出的王者~永恒全都取同一张图；
        ② 标签从「Lv.N + 头衔」改为「段位名 + 等级区间」，一段位一枚更清楚。 */
-    const cols=5,cw=138,rowH=100,x0=W/2-cols*cw/2+cw/2,y0=382;
+    /* [2026-10-06 v39] 用户要求：一行 4 枚、4 行 4 列，**平均分布刚好铺满空白区域**。
+       原先是 5 列（最后一行只剩 1 枚孤零零），下方还空一大片。
+       现在按区域 350~940 反算：4 行等分，每行中心 = 350 + rowH*(r+0.5) + 画图偏移。 */
+    const cols=4,gx0=50,gx1=700,cw=(gx1-gx0)/cols;
+    const gridTop=330,cellH=152;
+    const x0=gx0+cw/2,y0=gridTop+46;                            /* 每格图心位置 */
     MEDALS.forEach((m,idx)=>{
-      const cx=x0+(idx%cols)*cw,cy=y0+Math.floor(idx/cols)*rowH;
+      const cx=x0+(idx%cols)*cw,cy=y0+Math.floor(idx/cols)*cellH;
       const on=li.lv>=m.lv,ti=Math.max(0,Math.min(TIER_NAMES.length-1,m.tier)),el=MEDAL_IMG_ELS[ti];
       x.save();x.globalAlpha=on?1:.26;
-      try{if(el&&el.naturalWidth)x.drawImage(el,cx-30,cy-8,60,60)}catch(e){}
+      try{if(el&&el.naturalWidth)x.drawImage(el,cx-38,cy-38,76,76)}catch(e){}
       x.restore();
       x.textAlign='center';
-      x.fillStyle=on?m.color:'#c3cad8';x.font='bold 15px "Microsoft YaHei",sans-serif';
-      x.fillText(m.tierName,cx,cy+66);
-      x.fillStyle=on?'#55617c':'#d0d7e4';x.font='12px "Microsoft YaHei",sans-serif';
-      x.fillText('Lv.'+(m.lv===m.lvEnd?m.lv:(m.lv+'-'+m.lvEnd)),cx,cy+84);
+      x.fillStyle=on?m.color:'#c3cad8';x.font='bold 16px "Microsoft YaHei",sans-serif';
+      x.fillText(m.tierName,cx,cy+56);
+      x.fillStyle=on?'#55617c':'#d0d7e4';x.font='12.5px "Microsoft YaHei",sans-serif';
+      x.fillText('Lv.'+(m.lv===m.lvEnd?m.lv:(m.lv+'-'+m.lvEnd)),cx,cy+74);
     });
   };
   drawAv(()=>{
@@ -8225,7 +8270,7 @@ function drawCard(cb){
       }
       const ms=G1?140:206;
       const mi=MEDAL_IMG_ELS[Math.max(0,Math.min(TIER_NAMES.length-1,tierOf(li.lv)))];
-      const put=im=>{x.drawImage(im,W/2-ms/2,G1?318:398,ms,ms);fin()};
+      const put=im=>{x.drawImage(im,W/2-ms/2,G1?300:330,ms,ms);fin()};
       if(mi.complete&&mi.naturalWidth)put(mi);else{mi.onload=()=>put(mi);mi.onerror=fin;}
     }catch(e){fin()}
   });
