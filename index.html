@@ -2125,6 +2125,11 @@ function cloud(){
              on 是服务端算好的结论，seen_ago/updated_at 是前端兜底链路要的字段名，都给上。 */
           seen_ago: Math.max(0, Math.round((now() - Number(r.hb || 0)) / 1000)),
           ts: r.hb || 0, hidden: !!r.p_hidden, exp: Number(r.p_exp) || 0,
+          /* [2026-10-06 修「点同学资料卡看不到他养的宠物」] 名单以前只回身份/在线/经验，
+             压根没有宠物字段 → 前端 petCardRow 拿不到数据，资料卡永远显示「还没领养宠物」。
+             pets = 归一化后的 {类型:{lv}}（petRaw / p_pet.pets / 裸映射三处都认，走 petMapOf），
+             pet = 原始 p_pet（老前端只认这个字段，两个都给最保险）。 */
+          pets: petMapOf(r), pet: r.p_pet || null,
           created: r.created || '', updated: r.updated || '', updated_at: r.updated || ''
         };
       }).filter(function (x) { return !x.hidden; });
@@ -2161,6 +2166,8 @@ function cloud(){
         return {
           acc_id: r.aid, name: r.name, av: r.av, exp: Number(r.p_exp) || 0,
           on: online(r), created: r.created || '', updated: r.updated || '',
+          /* [2026-10-06 修] 榜单点头像进资料卡也要能看到宠物 */
+          pets: petMapOf(r), pet: r.p_pet || null,
           answers: Number((r.p_stats && r.p_stats.ans) || 0)
         };
       }).sort(function (x, y) { return (y.exp || 0) - (x.exp || 0) || (Number(y.on) - Number(x.on)); });
@@ -2900,6 +2907,8 @@ function cloud(){
           acc_id: rr.aid, name: rr.name, av: rr.av, on: online(rr),
           seen_ago: Math.max(0, Math.round((now() - Number(rr.hb || 0)) / 1000)),
           ts: rr.hb || 0, hidden: !!rr.p_hidden, exp: Number(rr.p_exp) || 0,
+          /* [2026-10-06 修] 与 wc_players 同款：名单要带宠物，好友页点开的资料卡才看得到对方养的宠物 */
+          pets: petMapOf(rr), pet: rr.p_pet || null,
           created: rr.created || '', updated: rr.updated || '', updated_at: rr.updated || ''
         };
       }).filter(function (x) { return !x.hidden; });
@@ -3357,6 +3366,7 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
 
 
 
@@ -10428,7 +10438,10 @@ function petCardRow(x){
   /* 好友的宠物来自 wc_players 返回的 pet 字段，服务端可能返回两种形态：
      ① 完整对象 {k, pets:{类型:{lv,...}}}（游戏里养的） ② 裸映射 {类型:等级}（后台 grant 写的）。
      统一归一化成 {类型:{lv}}，两种都认；顺便兼容 x.data.pet / x.p_pet。 */
-  const _p0 = x.pet || (x.data && x.data.pet) || x.p_pet || null;
+  /* [2026-10-06 修] 服务端名单（wc_players / wc_friend_page.players / wc_board）现在会带
+     pets 字段（petMapOf 归一化后的 {类型:{lv}}），这里优先读它；
+     读不到再退回老的 pet / p_pet 三种形态，老数据也能显示。 */
+  const _p0 = x.pets || x.pet || (x.data && x.data.pet) || x.p_pet || null;
   let list=[];
   if(_p0 && typeof _p0==='object'){
     if(_p0.pets && typeof _p0.pets==='object'){
