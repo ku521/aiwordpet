@@ -18,6 +18,11 @@
  *
  * 判定「慢站」用 hostname，不靠测速：一是省掉一次额外请求，
  * 二是 hostname 是确定性的（Github Pages 永远是境外那个域名）。
+ *
+ * [2026-10-06 用户要求改文案] 原来写「此地址是境外站，加载约 1 分钟」/「国内快速打开 →」，
+ * 用户不想看到「境外」「分钟」这种说法（会让同学觉得卡），改成中性的双线路表述：
+ *   「⚡ 切换线路2：WorkBuddy」 + 按钮「快速打开」。
+ * 两个线路承载的是同一份页面、同一份云存档，随时可以来回切。
  */
 (function(){
   try{
@@ -37,9 +42,9 @@
         'display:flex;align-items:center;gap:10px;box-shadow:0 2px 10px rgba(0,0,0,.28)');
       var t=document.createElement('span');
       t.style.flex='1';
-      t.innerHTML='\u26F1\uFE0F \u6b64\u5730\u5740\u662f\u5883\u5916\u7ad9\uff0c\u52a0\u8f7d\u7ea6 1 \u5206\u949f\u3002';
+      t.innerHTML='\u26A1 \u5207\u6362\u7EBF\u8DEF2\uFF1AWorkBuddy';
       var b=document.createElement('button');
-      b.textContent='\u56fd\u5185\u5feb\u901f\u6253\u5f00 \u2192';
+      b.textContent='\u5feb\u901f\u6253\u5f00';
       b.setAttribute('style',''+
         'flex:none;background:#4f6ef7;color:#fff;border:0;border-radius:9px;'+
         'padding:8px 13px;font:700 13px/1 "Microsoft YaHei",sans-serif;cursor:pointer;white-space:nowrap');
@@ -1541,7 +1546,13 @@ function cloud(){
        代价提示：主密钥理论上能删库，本应用只做整表读写，不碰删除接口。 */
     /* master:true 表示这把 key 是账号的 X-Master-Key（权限全开，对任意 bin 可读写）。
        上一把 STUdYABC 那把受限 Access Key 建完不能改权限，只能换 Master Key 顶上。 */
-    jb: { bin: '6ac251fdffd5d160534c0a27', key: '$2a$10$HNvM5WqUeZ7CO3CcbSBG0ezjgvGmsG1j8nW9/QwuUjgwyamukppBG', master: true },
+    /* 【2026-10-06 已下线】jsonbin.io —— 实测 GET/PUT 一律 403（账号被限/密钥失效），
+       每个用户打开页面都能在控制台看到满屏 403，纯噪音还把真正的报错淹没。
+       现在 bin 置空：jbCfgReady() 直接返回 false，读路径、写路径、补备库、
+       后台健康面板**全都绕开它**，一个请求都不会再打过去。
+       （主库 Turso + 备库 Supabase 已在正常工作，备份不依赖它。）
+       哪天 jsonbin 恢复、或换成别家备份，把 bin/key 填回来即可自动启用。 */
+    jb: { bin: '', key: '', master: true },
     /* 兜底键：npoint.io —— 免注册、免配权限，一个 URL 存一份 JSON。
        数据完全公开（URL 就是凭证）、无鉴权、免费无 SLA，适合当「谁都能用」的兜底库。 */
     np: { url: '__NP_URL__' },
@@ -1659,15 +1670,65 @@ function cloud(){
   function isObj(x) { return !!x && typeof x === 'object'; }
 
   /* ---------- 两个 driver：都只做「整表读 / 整表写」 ---------- */
+  /* [2026-10-06 修·关键] 原来这里是**裸 fetch，没有任何超时**。
+     实测问题：Turso 是境外节点，弱网/丢包时会出现「TCP 连上了但服务端迟迟不回包」，
+     fetch 的 Promise 就**永远不 settle**（既不 resolve 也不 reject）。
+     后果不是报错，而是**整条链路静静挂住**：
+       load() → raceRead() → tsRead() → tsExec() → jhttp() 卡死
+       → loadWithRetry 的 catch 永远等不到（它只在 reject 时才重试）
+       → renderFriendPageInner 的 await 永远不返回
+       → 好友页一直停在「正在加载…」，连报错都没有。
+
+     现在给每一次请求套一个硬超时（默认 12 秒，写入 18 秒）：
+     超时后**主动 abort 并 reject**，上层立刻能走「换备库 / 熔断 / 失败提示」，
+     页面最多卡 12 秒就一定有反馈，绝不无声挂死。
+     老浏览器没有 AbortController 时退化成 Promise.race（也能超时，只是请求还在跑）。 */
+  var NET_TIMEOUT = 12000;      /* 读：12 秒 */
+  var NET_TIMEOUT_W = 18000;    /* 写：18 秒（整表写更大，给宽一点）*/
+
+  /* 读一律 GET、写一律 PUT/POST —— 直接按 method 判定，不用每个调用点手工标记，
+     也就不会漏掉某一条路径。 */
+  function isWriteMethod(m) {
+    m = String(m || 'GET').toUpperCase();
+    return m === 'PUT' || m === 'POST' || m === 'PATCH' || m === 'DELETE';
+  }
+
+  function httpTimeout(ms) {
+    /* 老 Safari / 部分 WebView 没有 AbortController —— 用 race 兜底 */
+    var c = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = null;
+    var p = new Promise(function (_, rej) {
+      timer = setTimeout(function () {
+        if (c) { try { c.abort(); } catch (e) {} }
+        rej(new Error('请求超时（网络不通或太慢）'));
+      }, ms);
+    });
+    return { ctrl: c, guard: p, clear: function () { if (timer) { try { clearTimeout(timer); } catch (e) {} } } };
+  }
+
   function jhttp(url, opt) {
-    // opt: {method, body, headers}  返回解析后的 json；非 2xx 抛错
+    // opt: {method, body, headers, write}  返回解析后的 json；非 2xx 抛错
     if (typeof fetch !== 'function') return Promise.reject(new Error('浏览器不支持 fetch'));
-    return fetch(url, opt).then(function (r) {
+    opt = opt || {};
+    var to = httpTimeout(isWriteMethod(opt.method) ? NET_TIMEOUT_W : NET_TIMEOUT);
+    var o2 = {};
+    for (var kk in opt) if (Object.prototype.hasOwnProperty.call(opt, kk)) o2[kk] = opt[kk];
+    if (to.ctrl) { o2.signal = to.ctrl.signal; }
+    var run = fetch(url, o2).then(function (r) {
       return r.text().then(function (t) {
-        if (!r.ok) throw new Error((opt && opt.method || 'GET') + ' ' + r.status);
+        if (!r.ok) throw new Error((opt.method || 'GET') + ' ' + r.status);
         if (!t) return null;
         try { return JSON.parse(t); } catch (e) { return t; }
       });
+    });
+    /* race：谁先到算谁。请求成功后 clear 掉超时定时器；
+       请求先失败也 clear —— 不留悬垂定时器。 */
+    return Promise.race([run, to.guard]).then(function (v) {
+      to.clear();
+      return v;
+    }, function (e) {
+      to.clear();
+      throw e;
     });
   }
 
@@ -3606,6 +3667,9 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
+
+
 
 
 
@@ -7506,12 +7570,25 @@ function rulesHTML(){
     <td style="padding:6px 4px;border-bottom:1px solid #f0f3fa">${r[2]}</td>
     <td style="padding:6px 4px;border-bottom:1px solid #f0f3fa">${r[3]}</td>
     <td style="padding:6px 4px;border-bottom:1px solid #f0f3fa">${r[4]}</td></tr>`).join('');
+  /* [2026-10-06 修] 原来写的是 `need>=40000?'已满级'` —— 那是**23 级时代**的门槛
+     （当时 LVTAB 最后一项正好 40000，所以「>= 40000」等价于「最后一格」）。
+     等级扩到 60 级后，Lv16 往后的需求全部超过 40000 → 整张表从第 16 级起
+     一律显示「已满级」，反而把真正需要的经验值全挡住了（用户截图就是这个现象）。
+     现在改成：**只有最后一个等级**才标「已满级」，其余一律显示真实数值；
+     数字过万加千分位（123,456）更好读，也用中文单位缩写（万/亿）避免太长撑破格子。 */
+  const _lvMax=LVTAB.length-1;
+  const fmtExp=(n)=>{
+    n=Number(n)||0;
+    if(n>=100000000) return (n/100000000).toFixed(2).replace(/\.00$/,'')+' 亿';
+    if(n>=10000)     return (n/10000).toFixed(1).replace(/\.0$/,'')+' 万';
+    return String(n);
+  };
   let lvRows='';
   for(let i=0;i<TITLES.length;i++){
     const lv=i+1, need=LVTAB[i], ti=tierOf(lv);
     lvRows+=`<div class="lvCell"><span class="lvBadge" style="background:${TIER_COLORS[ti]}">Lv.${lv}</span>`
       +`<span class="lvTitle">${TITLES[i]}</span>`
-      +`<span class="lvNeed">${need>=40000?'已满级':need+' EXP'}</span>`
+      +`<span class="lvNeed">${i>=_lvMax?'已满级':fmtExp(need)+' EXP'}</span>`
       +`<span class="lvTier" style="color:${TIER_COLORS[ti]}">${TIER_NAMES[ti]}勋章</span></div>`;
   }
   let medalCells='';
@@ -7545,12 +7622,12 @@ function rulesHTML(){
       • 经验满后自动升级，头像下方进度条会显示「距下一级还需多少 EXP」。
     </div>
 
-    <div class="ruleSub">④ 进阶划分表（共 23 级，达到对应累计经验即升级）</div>
+    <div class="ruleSub">④ 进阶划分表（共 ${LVTAB.length} 级，达到对应累计经验即升级）</div>
     <div class="lvGrid">${lvRows}</div>
 
     <div class="ruleSub">⑤ 所有等级对应勋章（激活图）</div>
     <div class="mdGrid">${medalCells}</div>
-    <div style="font-size:11px;color:#a7b1c6;margin-top:6px">勋章按等级分 9 档：铁 → 青铜 → 白银 → 黄金 → 铂金 → 钻石 → 星耀 → 荣耀 → 至尊。你在「我的」页头像、勋章墙、战绩卡里看到的，就是当前等级对应的那一档。</div>
+    <div style="font-size:11px;color:#a7b1c6;margin-top:6px">勋章按等级分 ${TIER_NAMES.length} 档：${TIER_NAMES.join(' → ')}。你在「我的」页头像、勋章墙、战绩卡里看到的，就是当前等级对应的那一档。</div>
   </div>`;
 }
 
@@ -8635,7 +8712,11 @@ async function loadFriends(){
     _friendLoaded=true;
   }
 }
-let frReq=[], _chatWith=null, _frDuels=[], _bowlIv=null;
+let frReq=[], _chatWith=null, _bowlIv=null;
+/* [2026-10-06] 好友页整页加载预算（毫秒）。云层单请求超时 12 秒，
+   但老路径会连发 4 个请求 —— 没有这道总闸就会累加成 48~60 秒。
+   8 秒：比单请求超时略长，保证正常网络下一次就够；弱网下到点必给重试框。 */
+const FR_DEADLINE=8000;
 const QUICK=['👍 加油','⚔️ 来一局','🎯 今天我领先啦','📚 一起背单词','💪 别放弃','🌙 早点休息','🏆 向你学习','🙌 谢谢你'];
 
 /* [2026-10-06 删] frCard 已随好友页重构废弃，全文件无调用 */
@@ -8661,16 +8742,19 @@ function frWatchStart(w){
     try{
       /* 内容正常出来了 / 元素都换掉了 → 收掉看门狗 */
       if(!w||!w.isConnected||(w.textContent||'').indexOf('正在加载')<0){ frStopWatch(); return; }
-      /* [2026-10-06 修] 好友屏已经不 active = 人已经离开了：
-         这时自动重试会重启 15 秒轮询，于是「停在首页时后台仍每 15 秒下载一次整表」。
-         现在只在人真的停在好友页时才重试。 */
-      if(!frPagePolling()){ frStopWatch(); return; }
-      /* [2026-10-06] 3.5 秒还没出来就交给用户。
-         原来是 6 秒 + 先偷偷自动重试一次（等于再等 6 秒，用户要等 12 秒才看到任何提示），
-         而且重试还是同样的慢路径。现在直接给可点的重试框，别让人干等。 */
-      if(Date.now()-t0<=3500) return;
+      /* [2026-10-06 修·两代改写合流] 这里原本先后改过两次，方向相反：
+           ① 先是「好友屏不 active 就放弃看门狗」—— 本意是别在离开页面后还重试；
+           ② 后来发现切页时序是「先 renderFriendPage，再由 go() 加 active」，
+              那一瞬间 active 还没设上，看门狗会**直接自杀**，后面永久没人兜底。
+           现在统一成只用「元素还在不在」判断（上面已判过一次，这里是兜底双保险）：
+           人真的走了 w 会自动脱离文档；时序问题则完全不存在。 */
+      if(w && !w.isConnected){ frStopWatch(); return; }
+      /* [2026-10-06] 6 秒还没出来就交给用户。
+         更早是 3.5 秒 → 太短，网络稍慢就误报；又曾改成 6 秒 + 偷偷自动重试一次
+         （等于让用户干等 12 秒才看到提示）。现在：6 秒到点直接给**可点的**重试框。 */
+      if(Date.now()-t0<=6000) return;
       frStopWatch();
-      frRetryBox(w,'加载慢了，可能是网络不太稳','已等 3.5 秒；点下面按钮立刻重试');
+      frRetryBox(w,'加载慢了，可能是网络不太稳','已等 6 秒；点下面按钮立刻重试');
       const b=$('#frRetry'); if(b) b.textContent='🔄 重新加载好友数据';
     }catch(e){ frStopWatch(); }
   },1200);
@@ -8705,13 +8789,29 @@ async function renderFriendPageInner(seq){
      页面就永远停在「正在加载…」（切走再切回来必现，只能刷新） */
   try{ w._lh=null; }catch(e){}
   w.innerHTML='<div style="text-align:center;padding:24px;color:#8a95ad;font-size:13px">正在加载…</div>';
+  /* [2026-10-06 修·整页截止] 云层每个请求已有 12 秒硬超时，但好友页是
+     「合并读 1 次 + 失败后老路径 4 次」，最坏能拖 5 个超时 = 60 秒才报错。
+     这里再加一道**整页预算**：从进页起算，超时就直接给可点的重试框，
+     不再往下发任何请求。用户最多等 FR_DEADLINE 秒，且一定看得见反馈。 */
+  _t0=Date.now();
+  const overBudget=()=>((Date.now()-_t0)>FR_DEADLINE);
+  const budgetBox=(why2)=>{
+    if(seq!==_frSeq)return true;
+    const wb=$('#frWrap'); if(!wb)return true;
+    frStopWatch();
+    frRetryBox(wb,'好友数据没加载出来',
+      '已等 '+FR_DEADLINE+' 秒（'+((why||'网络')+' · '+why2)+'）；点下面按钮立刻重试');
+    return true;
+  };
   /* [2026-10-06 提速] 一次请求拿全：在线名单+好友+申请+挑战+礼物 合并接口。
      以前串行打 4 个读请求，慢网络下每步都超过 4 秒 TTL → 4 次整表下载，进页实测 5~6 秒；
      现在 1 次往返出整页。合并接口不可用时（浏览器还在跑旧云层）自动回落老路径。 */
   let pm=null, dr=null, why='';
   try{
+    if(overBudget()){ if(budgetBox('还没开始请求就超预算'))return; }
     const fp=await rpc('wc_friend_page',{p_aid:lk.aid,p_pw:lk.pw});
     if(seq!==_frSeq)return;
+    if(overBudget()){ if(budgetBox('等云端数据超时'))return; }
     const d=(fp&&fp.ok&&fp.data&&fp.data.ok)?(fp.data.data||null):null;
     if(d&&Array.isArray(d.players)){
       const map={}; d.players.forEach(p=>{map[p.acc_id]=p});
@@ -8742,16 +8842,22 @@ async function renderFriendPageInner(seq){
       frRetryBox(w2,'好友数据没加载出来',(why||'网络')+' · '+why2);
       return true;
     };
+    /* [2026-10-06] 老路径每一步之前都查整页预算：超了就不再发下一个请求，
+       直接给重试框。宁可让用户点一下重试，也不要连发 4 个注定超时的请求。 */
     try{
+      if(overBudget()){ if(budgetBox('合并读已用完预算'))return; }
       /* 老路径没有 d.unread，这里补读一次未读 */
       pmGiftPollUnread();
       await pmGiftLoadMine();
       if(seq!==_frSeq)return;
+      if(overBudget()){ if(budgetBox('礼物数据超时'))return; }
       const [pm0]=[await fetchPlayers()];
       if(!pm0){ if(failFast('读不到在线名单'))return; }
       if(seq!==_frSeq)return;
+      if(overBudget()){ if(budgetBox('在线名单超时'))return; }
       await loadFriends();
       if(seq!==_frSeq)return;
+      if(overBudget()){ if(budgetBox('好友列表超时'))return; }
       const dr2=await soci('duel_list');
       if(!dr2||!dr2.ok){ if(failFast('读不到挑战列表'))return; }
       dr=dr2; pm=pm0;
