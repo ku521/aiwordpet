@@ -522,7 +522,12 @@ input{font-family:inherit}
       <div class="chartTit">我的资料</div>
       <div id="pfCard" style="margin-top:10px"></div>
       <button class="bigBtn" id="btnPfEdit" style="margin-top:14px">✏️ 修改资料（头像 / 昵称 / 密码 / 账号）</button>
-      <button class="bigBtn ghost" id="btnLogoutCloud" style="margin-top:9px;color:#ef4444">🚪 退出账号</button>
+      <!-- [2026-10-06 新增] 退出账号后想在这个页面重新登录，必须往下翻到最底才看得到登录入口，很不合理。
+           所以在「退出账号」旁边并排放「登录云账号」：未登录时是登录入口，已登录时点它提示先退出。 -->
+      <div style="display:flex;gap:8px;margin-top:9px">
+        <button class="bigBtn ghost" id="btnLogoutCloud" style="flex:1;margin-top:0;color:#ef4444">🚪 退出账号</button>
+        <button class="bigBtn" id="btnLoginCloud" style="flex:1;margin-top:0">🔑 登录云账号</button>
+      </div>
       <div id="accSwitch" style="margin-top:12px"></div>
       <div class="shareTip" style="margin-top:10px">换账号：直接点上面「切换账号」列表里的账号即可，切换前会自动把当前进度同步到云端。</div>
     </div>
@@ -4727,7 +4732,16 @@ function admPanel(i){
       const r=await rpc('wc_admin',{p_admin:ADM.pw,p_action:'exp_set',p_aid:x.acc_id,p_val:v});
       const ok=r.ok&&r.data&&r.data.ok;
       const msg=(r.data&&r.data.msg)||(ok?('已设为 '+v+' EXP'):(r.msg||'修改失败'));
-      if(ok){toast(msg);await admRefresh();}else{$('#aeMsg').textContent=msg;$('#aeGo').disabled=false;$('#aeGo').textContent='确认修改'}
+      if(ok){
+        /* [2026-10-06 修「修改等级没生效」] 写成功后**当场把新经验回填到本地列表对象**，
+           再立刻重开详情页。以前只调 admRefresh()（只刷总表），详情页还是旧 x.exp，
+           看着像没生效；而且同学端要等他下次打开页面才会拉新经验，这里一并提示。 */
+        x.exp=v;
+        const _li=lvInfo(v);
+        toast('已设为 '+v+' EXP（Lv.'+_li.lv+' '+titleOf(_li.lv)+'）· 对方下次打开即生效');
+        await admRefresh();
+        admPanel(i);
+      }else{$('#aeMsg').textContent=msg;$('#aeGo').disabled=false;$('#aeGo').textContent='确认修改'}
     };
   };
   $('#aEx').onclick=()=>admForm(i,{icon:'📉',title:'经验清零',desc:`将 <b>${x.acc_id}</b> 的经验值清零（等级、排行榜名次随之重置）。用于处理刷分账号。`,confirm:true,action:'resetexp'});
@@ -4858,7 +4872,13 @@ async function admPetPanel(x){
      以前这里却去读 pets → 永远 undefined → 面板只会显示「该账号还没有宠物」，
      后台发宠物也像没生效。现在两种都认，统一整理成 {类型:{lv:等级}}。 */
   const _bd=(r.data.data||{})||{};
-  const pets=admPetMapOf(_bd.pet||_bd.pets||null)||{};
+  /* [2026-10-06 修·用户报「宠物管理加载不到宠物」] 优先读后端已归一化的 pets，
+     它由服务端 petMapOf 统一处理过 petRaw / p_pet.pets / 裸映射三种形态，最可靠；
+     读不到才退回原始 pet。之前这里优先读 pet，一旦 p_pet 是 {k:'chick',lv:5} 这种
+     「单只完整对象」就解析成空 → 面板永远显示「该账号还没有宠物」（用户截图就是这个）。 */
+  let pets={};
+  if(_bd.pets&&typeof _bd.pets==='object'&&Object.keys(_bd.pets).length) pets=admPetMapOf(_bd.pets)||{};
+  if(!Object.keys(pets).length) pets=admPetMapOf(_bd.pet||null)||{};
   const ks=Object.keys(pets);
   const rows=ks.length?ks.map(function(k){
     const q=PETS.find(function(v){return v.k===k;})||{n:k,i:'🐾'};
@@ -5424,25 +5444,19 @@ function pmPetLv(p){
   }
   return 1;
 }
-/* [2026-10-06 改版] 宠物尺寸 = 8 个固定阶梯，不再连续放大。
-   为什么改：连续放大到 1.5 倍后，低等级和高等级差别反而被「同屏多个宠物」冲淡，
-   而且尺寸跟着等级天天变会让人没有刻度感。改成**看得见的台阶**更清楚：
-     阶梯（1 小 → 8 大）对应等级段，Lv100 = 现在这个大小（1.0，永远是上限，不会溢出布局）
-       ① Lv1-5    0.42  幼崽
-       ② Lv6-15   0.54
-       ③ Lv16-28  0.64
-       ④ Lv29-42  0.74
-       ⑤ Lv43-55  0.82
-       ⑥ Lv56-68  0.88
-       ⑦ Lv69-84  0.94
-       ⑧ Lv85-100 1.00  满级（= 现有大小）
-   每升一档肉眼能看出「长大了」，而且尺寸有上限，Lv100 也不会把院子撑爆。 */
-const PET_TIERS=[[1,5,0.42],[6,15,0.54],[16,28,0.64],[29,42,0.74],[43,55,0.82],
-                  [56,68,0.88],[69,84,0.94],[85,100,1.0]];
+/* [2026-10-06 改版 v2] 宠物尺寸 = 8 个阶梯，按用户给的表：
+     Lv1-10 → 0.1（很小的一只幼崽）    Lv11-30 → 0.3
+     Lv31-50 → 0.5                     Lv51-70 → 0.7
+     Lv71-90 → 0.9                     Lv91-100 → 1.0（= 现有大小）
+     Lv101-150 → 1.5（_linear 过渡到 1.5）
+     Lv151-200 → 2.0（最大状态，Lv200+ 不再变大，封顶防撑爆布局）
+   注意：Lv51-70 那档用户写的是「41-70」，与 31-50 有重叠，这里按不重叠取 51-70。 */
+const PET_TIERS=[[1,10,0.1],[11,30,0.3],[31,50,0.5],[51,70,0.7],
+                  [71,90,0.9],[91,100,1.0],[101,150,1.5],[151,200,2.0]];
 function petTierIdx(lv){
-  const n=Math.max(1,Math.min(100,Number(lv)||1));
+  const n=Math.max(1,Number(lv)||1);
   for(let i=0;i<PET_TIERS.length;i++){ if(n<=PET_TIERS[i][1]) return i; }
-  return PET_TIERS.length-1;
+  return PET_TIERS.length-1;          /* Lv200+ 封顶在最后一档 */
 }
 function petScale(lv){ return PET_TIERS[petTierIdx(lv)][2]; }
 function petGlow(lv){
@@ -5456,9 +5470,24 @@ function petGlow(lv){
 /* 预加载为 Image 元素：勋章墙 / 大图弹窗 / 分享卡共用 */
 const MEDAL_IMG_ELS=MEDAL_IMGS.map(s=>{const im=new Image();im.src=s;return im});
 function medalHTML(lv){const i=Math.max(0,Math.min(14,tierOf(lv)));return `<img src="${MEDAL_IMGS[i]}" alt="${TIER_NAMES[i]}勋章" draggable="false" style="width:100%;height:auto;display:block">`}
+/* [2026-10-06 改] 勋章按**段位**聚合，不再每个等级一枚。
+   以前 MEDALS 是 60 项（每级一枚），但 Lv2-4 长得都是青铜章、Lv5-7 都是白银章…
+   60 张图根本放不下，重复得毫无意义。现在一个段位一枚 = **15 张**（铁→永恒），
+   lv 字段存「该段位的起始等级」，medalEarned(段位起始等级) 判定是否已点亮。
+   数据源仍是 TITLES/TIER_NAMES，段位起始等级由 tierOf 的分段规则反推。 */
+const TIER_START=(function(){
+  const a=[];let last=-1;
+  for(let lv=1;lv<=60;lv++){const t=tierOf(lv);if(t!==last){a[t]=lv;last=t;}}
+  return a;
+})();
 const MEDALS=(function(){
   const arr=[];
-  for(let i=0;i<TITLES.length;i++){const ti=tierOf(i+1);arr.push({lv:i+1,title:TITLES[i],color:TIER_COLORS[ti],tier:TIER_NAMES[ti]});}
+  for(let t=0;t<TIER_NAMES.length;t++){
+    const lv=TIER_START[t]||1;
+    arr.push({tier:t,lv:lv,title:titleOf(lv),color:TIER_COLORS[t],tierName:TIER_NAMES[t],
+              /* 该段位覆盖到几级（显示「Lv.26-30」这种区间更清楚） */
+              lvEnd:(t<TIER_NAMES.length-1?(TIER_START[t+1]||lv)-1:60)});
+  }
   return arr;
 })();
 function medalEarned(lv){return lvInfo(exp).lv>=lv;}
@@ -6910,6 +6939,7 @@ function renderLogin(){
   $('#btnLBack').style.display='';
   try{renderAccSwitch()}catch(e){}
   try{renderProfileCard()}catch(e){}
+  try{pfSyncLoginBtns()}catch(e){}   /* [2026-10-06] 登录状态决定「登录云账号」按钮的文案/配色 */
 }
 /* 个人资料摘要卡（只展示，点上面的按钮去改） */
 function renderProfileCard(){
@@ -6954,7 +6984,7 @@ async function logoutAccount(opt){
   try{ lk=cloudLink(); }catch(e){}
   let anonOnly=false;
   try{ anonOnly = !lk && !!(window.KVCloud&&KVCloud.anon&&KVCloud.anon.current&&KVCloud.anon.current()); }catch(e){}
-  if(!lk && !anonOnly){ toast('当前没有登录账号，没什么可退的'); return; }
+  if(!lk && !anonOnly){ toast('当前没有登录账号，没什么可退的'); try{pfSyncLoginBtns()}catch(e){} return; }
   const msg = lk
     ? '退出账号？退出前进度会先同步到云端保存；退出后本机恢复游客状态（数据清空、未登录限玩 3 轮），登录同一账号即可恢复。'
     : '当前是「本机试玩号」（还没连上云端）。退出后回到游客状态照常玩，本机号会留着，下次进来还是它。确定退出？';
@@ -6967,6 +6997,9 @@ async function logoutAccount(opt){
   }
   try{ cloudLogout(); }
   catch(e){ console.warn('[退出] cloudLogout 出错了，仍继续收尾：', e); }
+  /* [2026-10-06 新增] 退出后立刻把「登录云账号」按钮恢复成可点的登录态（文案/配色），
+     用户在这个页面就能直接重新登录，不用刷新页面。 */
+  try{ pfSyncLoginBtns(); }catch(e){}
   try{ if(typeof renderHome==='function') renderHome(); }catch(e){}
   try{ if(typeof go==='function') go('scr-home'); }catch(e){}
   toast(anonOnly ? '已退出本机试玩号，回到游玩状态（本机号保留，下次进来自动接管）' : '已退出账号，本机存档完整保留（重新登录同一个号即可恢复）');
@@ -6986,6 +7019,24 @@ async function refreshSocialAfterProfile(){
    结果只弹一句 toast 就退出了 —— 界面纹丝不动，看起来就是「按钮坏了」。
    现在三个入口统一走 logoutAccount()，无论有没有云账号都一定要落到「回到游客 + 说清楚发生了什么」。 */
 $('#btnLogoutCloud').onclick=()=>logoutAccount();
+/* [2026-10-06 新增] 「登录云账号」按钮（与退出账号并排）。
+   未登录 → 直接打开登录窗；已登录 → 提示「当前已登录 XX，先退出再换一个」，
+   免得点了没反应以为是坏的。按钮文案也跟着登录状态变。 */
+$('#btnLoginCloud').onclick=()=>{
+  const lk=cloudLink();
+  if(lk){ toast('当前已登录 '+lk.aid+'，如要换账号请先点「退出账号」'); return; }
+  try{ cloudLoginForm(); }catch(e){ try{ renderLogin(); go('scr-login'); }catch(e2){ toast('请下拉页面点「登录 / 注册」'); } }
+};
+/* 登录状态变化时刷新这两个按钮的可用状态与文案 */
+function pfSyncLoginBtns(){
+  const b=$('#btnLoginCloud'), lo=$('#btnLogoutCloud');
+  if(!b)return;
+  const lk=cloudLink();
+  b.textContent=lk?('🔑 已登录 '+lk.aid):'🔑 登录云账号';
+  b.style.background=lk?'#f1f4fb':'linear-gradient(135deg,#4f6ef7,#7a5cf0)';
+  b.style.color=lk?'#8a95ad':'#fff';
+  if(lo) lo.style.opacity=lk?'1':'.5';
+}
 
 /* ---------- 首次打开：弹出登录 / 注册窗口 ---------- */
 function maybeFirstRunCloud(){
@@ -7376,13 +7427,15 @@ function renderMedals(){
   $('#medalSub').textContent=`Lv.${li.lv} · ${titleOf(li.lv)}`;
   $('#medalGot').textContent=got;
   const mt=$('#medalTotal');if(mt)mt.textContent=MEDALS.length;
+  /* [2026-10-06] 一个段位一枚章（15 张），标签显示段位名 + 等级区间 */
   $('#medalWall').innerHTML=MEDALS.map(m=>{
     const on=medalEarned(m.lv);
+    const lvTx=(m.lv===m.lvEnd)?('Lv.'+m.lv):('Lv.'+m.lv+'-'+m.lvEnd);
     return `<div class="medal ${on?'on':'off'}" data-lv="${m.lv}" style="${on?`--mc:${m.color}`:''};cursor:pointer">
       ${on?'<span class="got">✅</span>':'<span class="lock">🔒</span>'}
       <div class="me">${medalHTML(m.lv)}</div>
-      <div class="ml" style="${on?`color:${m.color}`:''}">Lv.${m.lv}</div>
-      <div class="mt">${m.title}</div>
+      <div class="ml" style="${on?`color:${m.color}`:''}">${m.tierName}</div>
+      <div class="mt" style="font-size:9.5px;opacity:.85">${lvTx}</div>
     </div>`;
   }).join('');
   try{renderFriendsBoard()}catch(e){}
@@ -7391,11 +7444,14 @@ $('#btnMBack').onclick=()=>{go('scr-home');renderHome()};
 $('#btnToCard').onclick=()=>{cardFrom='medals';cardStyle=0;syncCardSeg();drawCard();go('scr-share')};
 /* 点勋章弹大图 */
 function showMedalBig(lv){
-  const m=MEDALS[lv-1],on=medalEarned(lv);
-  $('#mbIcon').innerHTML=medalHTML(lv);
+  /* [2026-10-06 改] MEDALS 现在是「段位」表（15 项，lv 存段位起始等级），
+     不能再用 MEDALS[lv-1] 下标寻址（lv=26 会越界）。改成按段位起始等级反查。 */
+  const m=MEDALS.find(z=>z.lv===lv)||MEDALS.filter(z=>z.lv<=lv).pop()||MEDALS[0];
+  const on=medalEarned(m.lv);
+  $('#mbIcon').innerHTML=medalHTML(m.lv);
   $('#mbIcon').style.filter=on?'none':'grayscale(1) opacity(.6)';
-  $('#mbName').textContent=m.title;
-  $('#mbLv').textContent='Lv.'+lv+' · '+m.tier+'勋章';
+  $('#mbName').textContent=m.tierName+'勋章';
+  $('#mbLv').textContent='Lv.'+m.lv+(m.lv===m.lvEnd?'':'~'+m.lvEnd)+' · '+m.title;
   $('#mbState').textContent=on?'✅ 已获得，继续保持！':'🔒 未获得 · 闯关升级即可点亮';
   $('#mbState').style.color=on?'#10b981':'#8a95ad';
   $('#medalBig').style.display='flex';sTap();
@@ -7413,7 +7469,11 @@ function showFriendCard(x){
      本地 friendsGet 只是关注（还没走云端好友申请），服务端不认，点了必然失败。 */
   const _gfCan=isFriend(x.acc_id)||isAdminAcc();
   const li2=lvInfo(x.exp||0);
-  const gotN=Math.min(li2.lv,MEDALS.length);
+  /* [2026-10-06 修] 勋章数按**段位**算，不再拿等级去卡 MEDALS.length：
+     MEDALS 现在是 15 枚段位章（一个段位一枚），以前 `Math.min(等级, MEDALS.length)`
+     是按「每级一枚」的旧表算的 —— 加了高段位后这个公式会算出「Lv.40 亮 15 枚」这种假数。
+     正确口径：已点亮的段位数 = 当前等级 ≥ 该段位起始等级的个数。 */
+  const gotN=MEDALS.filter(m=>li2.lv>=m.lv).length;
   const st=x.stats||{};
   const acc=st.ans?Math.round((st.ok||0)/st.ans*100):null;
   const fr=friendsGet().indexOf(x.acc_id)>=0||isFriend(x.acc_id);
@@ -7485,7 +7545,7 @@ function renderFriendsBoard(){
     const chip=(ic,v)=>'<span style="font-size:10px;color:#6b7591;background:#f4f6fb;border-radius:999px;padding:3px 8px;white-space:nowrap">'+ic+' '+v+'</span>';
     const row=(x,i)=>{
       const li2=lvInfo(x.exp||0);
-      const gotN=Math.min(li2.lv,MEDALS.length);
+      const gotN=MEDALS.filter(m=>li2.lv>=m.lv).length;       /* 勋章数按段位算（与资料卡同一口径）*/
       const days=(x.days||0);
       const isMe=my&&x.acc_id===my.aid;
       const isFr=fr.indexOf(x.acc_id)>=0;
@@ -7727,24 +7787,28 @@ function drawCard(cb){
   // 图片勋章（预加载 Image → canvas，与勋章墙完全同款）
   const fin=()=>{$('#shareImg').src=c.toDataURL('image/png');lastCard=c;if(cb)cb(c)};
   const drawMedalGrid=()=>{
-    const cols=4,cw=150,rowH=95,x0=W/2-cols*cw/2+cw/2,y0=388;
+    /* [2026-10-06 改] 勋章按段位聚合后是 15 枚（原来 60 枚，网格排不下）。
+       ① 图索引改用 m.tier（段位序号 0-14）直取 —— 以前 Math.min(8,tierOf(lv))
+          把档位硬卡在 8，超出的王者~永恒全都取同一张图；
+       ② 标签从「Lv.N + 头衔」改为「段位名 + 等级区间」，一段位一枚更清楚。 */
+    const cols=5,cw=138,rowH=100,x0=W/2-cols*cw/2+cw/2,y0=382;
     MEDALS.forEach((m,idx)=>{
       const cx=x0+(idx%cols)*cw,cy=y0+Math.floor(idx/cols)*rowH;
-      const on=li.lv>=m.lv,ti=Math.max(0,Math.min(8,tierOf(m.lv))),el=MEDAL_IMG_ELS[ti];
+      const on=li.lv>=m.lv,ti=Math.max(0,Math.min(TIER_NAMES.length-1,m.tier)),el=MEDAL_IMG_ELS[ti];
       x.save();x.globalAlpha=on?1:.26;
       try{if(el&&el.naturalWidth)x.drawImage(el,cx-30,cy-8,60,60)}catch(e){}
       x.restore();
       x.textAlign='center';
       x.fillStyle=on?m.color:'#c3cad8';x.font='bold 15px "Microsoft YaHei",sans-serif';
-      x.fillText('Lv.'+m.lv,cx,cy+66);
-      x.fillStyle=on?'#55617c':'#d0d7e4';x.font='13px "Microsoft YaHei",sans-serif';
-      x.fillText(m.title,cx,cy+84);
+      x.fillText(m.tierName,cx,cy+66);
+      x.fillStyle=on?'#55617c':'#d0d7e4';x.font='12px "Microsoft YaHei",sans-serif';
+      x.fillText('Lv.'+(m.lv===m.lvEnd?m.lv:(m.lv+'-'+m.lvEnd)),cx,cy+84);
     });
   };
   drawAv(()=>{
     try{
       if(G2){
-        const need=MEDALS.map(m=>Math.max(0,Math.min(8,tierOf(m.lv)))).filter(i=>{const el=MEDAL_IMG_ELS[i];return !(el.complete&&el.naturalWidth)});
+        const need=MEDALS.map(m=>Math.max(0,Math.min(TIER_NAMES.length-1,m.tier))).filter(i=>{const el=MEDAL_IMG_ELS[i];return !(el.complete&&el.naturalWidth)});
         const done=()=>{drawMedalGrid();fin()};
         if(!need.length){done();return}
         let left=need.length;
