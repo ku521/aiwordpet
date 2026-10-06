@@ -1146,6 +1146,43 @@ function bookCSVTemplate(){
 
 /* ================= STATE ================= */
 const $=s=>document.querySelector(s);
+/* ---------- [2026-10-06 新增] $s：安全取元素，取不到给一个不炸的空壳 ----------
+   为什么需要：全站有 100 多处 `$s('#x').onclick= ...` 这种裸写法，
+   只要那个元素当前不在 DOM 里（不少屏是「用到才渲染」），赋 onclick 就抛
+   TypeError: Cannot set properties of null。一处抛错落在关键路径上，
+   会把后面的启动/渲染逻辑全打断。
+   用法：裸的 $("#x").xxx 改成 $s("#x").xxx 即可（只改事件绑定这类"存在才做"的操作）。
+   `$` 本身语义不变、仍返回 null —— 现有 `if($('#x'))` 判空写法不受任何影响。 */
+const _MISSING=new Set();
+function _ghost(sel){
+  const warn=function(){
+    const k=String(sel);
+    if(_MISSING.has(k)) return;           /* 同一个选择器只提示一次，否则一轮渲染刷几十条 */
+    _MISSING.add(k);
+    console.warn('[缺元素] 页面里找不到', k, '—— 这次操作已跳过');
+  };
+  return new Proxy({},{
+    get(t,k){
+      if(typeof k==='symbol') return undefined;
+      /* style / dataset / classList 这类「对象型」属性要返回**带方法**的空壳，
+         否则 `el.classList.add('x')` 会报 xxx.add is not a function（实测踩到）。
+         这里给它们套上各自的空方法，任何调用都不炸。 */
+      if(k==='style') return t[k]||(t[k]=new Proxy({},{ get:()=>'' , set:(o,kk,v)=>{o[kk]=v;return true;} }));
+      if(k==='classList') return t[k]||(t[k]={ add:function(){}, remove:function(){}, toggle:function(){}, contains:function(){return false;} });
+      if(k==='dataset') return t[k]||(t[k]=new Proxy({},{ get:(o,kk)=>o[kk], set:(o,kk,v)=>{o[kk]=v;return true;} }));
+      if(k==='textContent'||k==='innerHTML'||k==='value') return t[k]||'';
+      if(k==='checked'||k==='disabled'||k==='hidden') return false;
+      if(k==='addEventListener'||k==='removeEventListener') return function(){};
+      if(k in t) return t[k];
+      return function(){ warn(); return undefined; };
+    },
+    set(t,k,v){ t[k]=v; return true; }
+  });
+}
+function $s(sel){
+  const e=document.querySelector(sel);
+  return e||_ghost(sel);
+}
 
 /* ---------- 多用户：每个档案独立命名空间（本机保存） ---------- */
 let UID=null;                                   // null = 老数据（未建档案时的默认存档）
@@ -2040,6 +2077,24 @@ function cloud(){
       return added;
     }).catch(function () { return 0; });
   }
+  /* [2026-10-06 新增] 读失败重试。
+     实测：网络抖一下（单次 raceRead 没拿到任何后端）就会让后续一连串社交动作
+     连锁失败（好友没建立 → 消息一律「只能给好友发消息」→ 收发全断），
+     而当时网络其实是好的、只是那一次没成。
+     所以读失败时**等一下再试**，最多 2 次；都失败才认。 */
+  function loadWithRetry(force) {
+    return load(force).catch(function (e1) {
+      return sleep(300).then(function () {
+        return load(true).catch(function (e2) {
+          throw e2 || e1;
+        });
+      });
+    });
+  }
+  function sleep(ms) {
+    return new Promise(function (r) { try { setTimeout(r, ms); } catch (e) { r(); } });
+  }
+
   function load(force) {
     if (_T && !force && (now() - _TTS) < TABLE_TTL) return Promise.resolve(_T);
     var first = !_T;
@@ -2075,8 +2130,18 @@ function cloud(){
       var needBak = hasAny && (seeded || jbCfgReady() || npCfgReady());
       if (!needBak) return t;   // 兜底库读不到也没数据，先不写，避免覆盖
       var bakJobs = [];
-      if (jbCfgReady()) bakJobs.push(jbWrite(_T).catch(function () { return false; }));
-      if (npCfgReady()) bakJobs.push(npWrite(_T).catch(function () { return false; }));
+      /* [2026-10-06 修] 同 commit：连续失败的备库熔断 60 秒直接跳过。
+         jsonbin 早就 403 了，原来每次首次拉表都去戳它一遍，控制台全是
+         `PUT https://api.jsonbin.io/... 403`。备份不会丢 —— 窗口过了还会重试。 */
+      var DEAD2 = 60000;
+      var live2 = function (n) {
+        var h = HEALTH[n] || {};
+        if (h.ok) return true;
+        return !(h.at && (now() - h.at) < DEAD2);
+      };
+      if (jbCfgReady() && live2('jb')) bakJobs.push(jbWrite(_T).catch(function (e) { markBad('jb', e); return false; }));
+      if (npCfgReady() && live2('np')) bakJobs.push(npWrite(_T).catch(function (e) { markBad('np', e); return false; }));
+      if (!bakJobs.length) return t;   /* 全在熔断中，先不补，等窗口过了再说 */
       return Promise.all(bakJobs).then(function () { return t; });
   }
 
@@ -2088,7 +2153,22 @@ function cloud(){
     var data = _T;
     if (!data) return Promise.resolve(false);
     localWrite(data);
-    var cloud = backendOrder().filter(function (n) { return n !== 'local'; });
+    /* [2026-10-06 修·实测] 原来每次保存都会遍历**所有**后端写一遍，
+       包括早就 403 失效的 jsonbin —— 用户控制台里满屏都是
+       `PUT https://api.jsonbin.io/... 403 (Forbidden)`，而且每一次登录/存档/
+       送礼都在刷，纯浪费还把真正的错误淹没在噪音里。
+       现在和读路径同一套规矩：
+         ① 主库优先写（成功即算完，剩下的异步补）；
+         ② 连续失败的备库**熔断 60 秒直接跳过**，不再每次都去戳一个已知的坏接口；
+         ③ 熔断只是「暂时不试」，不代表放弃备份 —— 窗口过了还会重试补上。 */
+    var DEAD_MS = 60000;
+    function live(n) {
+      var h = HEALTH[n] || {};
+      if (h.ok) return true;
+      return !(h.at && (now() - h.at) < DEAD_MS);
+    }
+    var cloud = backendOrder().filter(function (n) { return n !== 'local' && live(n); });
+    if (!cloud.length) cloud = backendOrder().filter(function (n) { return n !== 'local'; });
     function tryWrite(i) {
       if (i >= cloud.length) return Promise.resolve(false);   /* 云端全挂，但本机已写 */
       var n = cloud[i], t0 = tick();
@@ -2109,6 +2189,14 @@ function cloud(){
         return tryWrite(i + 1);
       });
     }
+    /* [2026-10-06 说明] 这里**故意不加**「提交前对比云端、发现变了就合并」的逻辑。
+       曾加过一版（理由是担心整表覆盖丢数据），但那个结论来自一个**写错的诊断脚本**
+       （它复用了带内存快照的客户端，把本地读数当成云端真相）；
+       用「全新客户端当旁观者」复验后确认数据本来就好好地写进了云端。
+       更关键：那个合并的实现是「本地覆盖云端同名记录」，
+       在没有数据丢失的前提下，它凭空制造了覆盖窗口 —— 净负面效果，已撤掉。
+       真正保护数据一致性的机制是：**所有写类动作在改数据前强制 loadWithRetry(true)
+       重新拉最新**，而不是在这里事后打补丁。 */
     return tryWrite(0).then(function () { return true; });
   }
   /* 心跳：把 on 状态写进表（顺便刷新 updated） */
@@ -2148,7 +2236,7 @@ function cloud(){
     var pw = String((b && b.p_pw) || '');
     if (!aid) return { ok: false, msg: '账号为空' };
     if (!pw) return { ok: false, msg: '密码为空' };
-    return load(true).then(function () {        /* 注册要占用新账号，必须先看云端最新名单 */
+    return loadWithRetry(true).then(function () {        /* 注册要占用新账号，必须先看云端最新名单 */
       if (rec(aid)) return { ok: true, data: { ok: false, msg: '该账号已被占用，换一个或直接登录' } };
       var created = iso(new Date());
       var r = {
@@ -2170,7 +2258,7 @@ function cloud(){
 
   H.wc_login = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
-    return load(true).then(function () {        /* 登录会刷新心跳并写库，先拿最新表 */
+    return loadWithRetry(true).then(function () {        /* 登录会刷新心跳并写库，先拿最新表 */
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在（账号是字母+数字，系统会自动转成大写后比对）' } };
       var pw = String((b && b.p_pw) || '');
@@ -2187,7 +2275,7 @@ function cloud(){
     var cp = cfgProblem();
     if (cp) return { ok: false, msg: cp };
     /* 存档是整表覆盖写：不先拉最新，就会把别人刚发的消息/心跳/礼包一起回滚掉 */
-    return load(true).then(function () {
+    return loadWithRetry(true).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在，请先登录' } };
       var pw = String((b && b.p_pw) || '');
@@ -2351,7 +2439,7 @@ function cloud(){
 
   H.wc_update_profile = function (b) {
     var aid = String((b && b.p_aid) || '').trim().toUpperCase();
-    return load(true).then(function () {
+    return loadWithRetry(true).then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2458,7 +2546,13 @@ function cloud(){
       hb: 1, req_send: 1, req_act: 1, unfriend: 1, msg_send: 1, duel_create: 1, fb_add: 1,
       friends_list: 1, msg_list: 1, duel_list: 1, duel_get: 1, news_list: 1, fb_mine: 1
     };
-    return load(!!SOC_W[act]).then(function () {
+    /* 写类动作加一次读重试：拿不到最新表就别改，改了也是白改 */
+    /* 写类动作走 loadWithRetry（读失败等 300ms 重试一次）：
+       读不到最新表就别改，改了也是白改（还会把旧快照写回去覆盖别人）。
+       纯读动作（好友列表/聊天记录/挑战列表）走 load()，吃缓存、不加重试开销。 */
+    var _need = !!SOC_W[act];
+    var _ld = _need ? loadWithRetry(true) : load();
+    return _ld.then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2788,7 +2882,11 @@ function cloud(){
       gift_take: 1, gift_send: 1, admin_pet_set: 1, gift_bulk: 1,
       unread: 1, gift_list: 1, admin_bags: 1
     };
-    return load(!!GIFT_W[act]).then(function () {
+    /* 同 wc_social：写类（领取/赠送/群发/后台发宠物）读失败要重试，
+       纯读（unread/gift_list）走缓存不加重试。 */
+    var _needG = !!GIFT_W[act];
+    var _ldG = _needG ? loadWithRetry(true) : load();
+    return _ldG.then(function () {
       var r = rec(aid);
       if (!r) return { ok: true, data: { ok: false, msg: '账号不存在' } };
       var pw = String((b && b.p_pw) || '');
@@ -2952,7 +3050,7 @@ function cloud(){
   H.wc_pet_grant = function (b) {
     var pw = String((b && b.p_admin) || '');
     var v = (b && b.p_val) || {};
-    return load(true).then(function () {        /* 后台发宠物：改的是别人的记录，必须最新 */
+    return loadWithRetry(true).then(function () {        /* 后台发宠物：改的是别人的记录，必须最新 */
       var g = adminOnly(pw);
       if (!g.ok) return { ok: true, data: { ok: false, msg: '无权限（要管理员口令，拿自己账号的密码改宠物没用）' } };
       var r = rec(String(v.aid || '').toUpperCase());
@@ -3085,7 +3183,7 @@ function cloud(){
     var pw = String((b && b.p_admin) || '');
     var act = String((b && b.p_action) || '');
     var v = (b && b.p_val) || {};
-    return load(true).then(function () {
+    return loadWithRetry(true).then(function () {
       var g = adminOnly(pw);
       if (!g.ok) return { ok: true, data: { ok: false, msg: '无权限（要管理员口令，拿自己账号的密码改仓库没用）' } };
       if (act === 'fb_list') {
@@ -3177,7 +3275,7 @@ function cloud(){
   H.wc_admin = function (b) {
     var pw = String((b && b.p_admin) || '');
     var act = String((b && b.p_action) || '');
-    return load(true).then(function () {
+    return loadWithRetry(true).then(function () {
       var g = adminOnly(pw);
       if (!g.ok) return { ok: true, data: { ok: false, msg: '无权限（要管理员口令，别拿自己账号的密码来删号）' } };
       var r = rec(String((b && b.p_aid) || '').toUpperCase());
@@ -3496,6 +3594,10 @@ function cloud(){
   };
   kvCheckBoot();
 })(typeof window !== 'undefined' ? window : globalThis);
+
+
+
+
 
 
 
@@ -4502,9 +4604,9 @@ function cloudRegister(){
     <button class="bigBtn" id="crGo">注册并同步</button>
     <button class="bigBtn ghost" id="crCancel" style="margin-top:8px">取消</button>`);
   $('#crAid').addEventListener('input', e=>{ e.target.value=e.target.value.replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12); });
-  $('#crSwap').onclick=()=>{ $('#crAid').value=genId(); $('#crMsg').textContent=''; };
-  $('#crCancel').onclick=()=>cClose();
-  $('#crGo').onclick=async()=>{
+  $s('#crSwap').onclick=()=>{ $('#crAid').value=genId(); $('#crMsg').textContent=''; };
+  $s('#crCancel').onclick=()=>cClose();
+  $s('#crGo').onclick=async()=>{
     const aid=($('#crAid').value||'').trim().toUpperCase(); const nm=($('#crName').value||'').trim(); const pw=($('#crPw').value||'');
     if(!/^[A-Z0-9]{8,12}$/.test(aid)){ $('#crMsg').textContent='账号需为字母和数字，长度 8–12 位（最少 8 位，不容易重复）'; return; }
     if(hasConsecutiveDigits(aid)){ $('#crMsg').textContent='账号不能包含连续数字（如 1234），请点「换一个」或重新自定义'; return; }
@@ -4545,7 +4647,7 @@ function cloudLoginForm(){
     <button class="bigBtn ghost" id="clCancel" style="margin-top:8px">取消</button>`);
   $('#clAid').addEventListener('input', e=>{ e.target.value=e.target.value.replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12); });
   const _lastRecent=cloudRecentGet()[0]; if(_lastRecent&&_lastRecent.aid)$('#clAid').value=_lastRecent.aid;
-  $('#clCancel').onclick=()=>cClose();
+  $s('#clCancel').onclick=()=>cClose();
   document.querySelectorAll('#cModalBox .qaRow').forEach(el=>{
     el.onclick=async()=>{
       const rec=cloudRecentGet().find(x=>x&&x.aid===el.dataset.aid); if(!rec||!rec.pw)return;
@@ -4557,7 +4659,7 @@ function cloudLoginForm(){
       cClose(); renderMe(); toast('已登录 '+rec.aid+'，进度已同步 ☁️');
     };
   });
-  $('#clGo').onclick=async()=>{
+  $s('#clGo').onclick=async()=>{
     const aid=($('#clAid').value||'').trim().toUpperCase(); const pw=($('#clPw').value||'');
     if(!/^[A-Z0-9]{1,12}$/.test(aid)){ $('#clMsg').textContent='账号格式不对（字母 + 数字）'; return; }
     if(!pw){ $('#clMsg').textContent='请填写密码'; return; }
@@ -4617,7 +4719,7 @@ function openProfilePanel(){
   drawAva();
   const msg=t=>{ const el=$('#cpMsg'); if(el)el.textContent=t||''; };
   /* 头像棋盘：内置表情 / 自己的照片 */
-  $('#cpAva').onclick=e=>{
+  $s('#cpAva').onclick=e=>{
     const s=e.target.closest('[data-a]'); if(!s)return;
     if(s.dataset.a==='__up'){
       const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
@@ -4641,9 +4743,9 @@ function openProfilePanel(){
     }
     newAva=s.dataset.a; sTap(); drawAva();
   };
-  $('#cpCancel').onclick=()=>cClose();
+  $s('#cpCancel').onclick=()=>cClose();
   const _gl=$('#cpGoLogin'); if(_gl) _gl.onclick=()=>{ cClose(); cloudLoginForm(); };
-  $('#cpGo').onclick=async()=>{
+  $s('#cpGo').onclick=async()=>{
     const nm=($('#cpName').value||'').trim();
     const npw=$('#cpPw')?($('#cpPw').value||''):'';
     const opw=$('#cpOldPw')?($('#cpOldPw').value||''):'';
@@ -4708,8 +4810,8 @@ function cloudAdmin(){
     <div id="caMsg" style="font-size:12px;color:#ef4444;min-height:16px;margin-bottom:8px"></div>
     <button class="bigBtn" id="caGo">进入后台</button>
     <button class="bigBtn ghost" id="caCancel" style="margin-top:8px">取消</button>`);
-  $('#caCancel').onclick=()=>cClose();
-  $('#caGo').onclick=async()=>{
+  $s('#caCancel').onclick=()=>cClose();
+  $s('#caGo').onclick=async()=>{
     const pw=($('#caPw').value||''); if(!pw){ $('#caMsg').textContent='请输入管理口令'; return; }
     $('#caGo').textContent='验证中…'; $('#caGo').disabled=true;
     const r=await rpc('wc_board',{p_admin:pw});
@@ -4748,12 +4850,12 @@ function admRender(){
     <div style="display:flex;gap:8px;margin-top:10px"><button class="bigBtn" id="admGiftAll" style="flex:1;background:linear-gradient(135deg,#fb8f4a,#f97316)">🎁 一键群发全体</button></div>
     <div style="display:flex;gap:8px;margin-top:8px"><button class="bigBtn ghost" id="admFb" style="flex:1">📨 反馈管理</button><button class="bigBtn ghost" id="admNews" style="flex:1">📣 发布动态</button></div>
     <button class="bigBtn ghost" id="admOut" style="margin-top:10px">退出后台</button>`);
-  $('#admOut').onclick=()=>cClose();
-  $('#admGiftAll').onclick=()=>admGiftAllPanel();
-  $('#admFb').onclick=()=>admFeedback();
-  $('#admNews').onclick=()=>admNews();
+  $s('#admOut').onclick=()=>cClose();
+  $s('#admGiftAll').onclick=()=>admGiftAllPanel();
+  $s('#admFb').onclick=()=>admFeedback();
+  $s('#admNews').onclick=()=>admNews();
   $('#admQ').oninput=e=>{ADM.q=e.target.value;const pos=e.target.selectionStart;admRender();const el=$('#admQ');el.focus();try{el.setSelectionRange(pos,pos)}catch(err){}};
-  $('#admList').onclick=e=>{const r=e.target.closest('.admRow');if(r)admPanel(+r.dataset.i)};
+  $s('#admList').onclick=e=>{const r=e.target.closest('.admRow');if(r)admPanel(+r.dataset.i)};
 }
 function admPanel(i){
   const x=ADM.list[i]; if(!x)return;
@@ -4785,19 +4887,19 @@ function admPanel(i){
     ${btn('aBn',x.banned?'✅ 解除封禁':'🚫 封禁账号','ghost')}
     ${btn('aDel','🗑️ 删除账号','ghost')}
     <button class="bigBtn ghost" id="aBack" style="margin-top:8px">返回总表</button>`);
-  $('#aBack').onclick=()=>admRender();
+  $s('#aBack').onclick=()=>admRender();
   /* 背包/宠物摘要 + 三个管理入口 */
   admBagBox(x);
-  $('#aBag').onclick=()=>admBagPanel(x);
-  $('#aPet').onclick=()=>admPetPanel(x);
-  $('#aGift').onclick=()=>admGiftOne(x);
-  $('#aPw').onclick=()=>admForm(i,{icon:'🔑',title:'重置密码',desc:`为 <b>${x.acc_id}</b> 设置新密码，设置后直接把新密码告诉对方即可登录。`,input:true,ph:'输入新密码（至少 6 位）',action:'resetpw'});
-  $('#aId').onclick=()=>admForm(i,{icon:'🆔',title:'修改账号 ID',desc:`把 <b>${x.acc_id}</b> 改成对方好记的 ID（4-16 位字母或数字）。<br>⚠️ 改完后：对方需退出重新登录；其他加过TA好友的同学要删掉重新加。`,input:true,ph:'输入新 ID',action:'rename'});
-  $('#aNm').onclick=()=>admForm(i,{icon:'✏️',title:'修改昵称',desc:`为 <b>${x.acc_id}</b> 设置新昵称（1-12 字）。`,input:true,ph:'输入新昵称',action:'setname'});
+  $s('#aBag').onclick=()=>admBagPanel(x);
+  $s('#aPet').onclick=()=>admPetPanel(x);
+  $s('#aGift').onclick=()=>admGiftOne(x);
+  $s('#aPw').onclick=()=>admForm(i,{icon:'🔑',title:'重置密码',desc:`为 <b>${x.acc_id}</b> 设置新密码，设置后直接把新密码告诉对方即可登录。`,input:true,ph:'输入新密码（至少 6 位）',action:'resetpw'});
+  $s('#aId').onclick=()=>admForm(i,{icon:'🆔',title:'修改账号 ID',desc:`把 <b>${x.acc_id}</b> 改成对方好记的 ID（4-16 位字母或数字）。<br>⚠️ 改完后：对方需退出重新登录；其他加过TA好友的同学要删掉重新加。`,input:true,ph:'输入新 ID',action:'rename'});
+  $s('#aNm').onclick=()=>admForm(i,{icon:'✏️',title:'修改昵称',desc:`为 <b>${x.acc_id}</b> 设置新昵称（1-12 字）。`,input:true,ph:'输入新昵称',action:'setname'});
   /* [2026-10-06 新增] 修改经验值：以前后台只能「一键清零」，不能给指定账号加经验/调等级。
      现在可直接填目标经验值，并实时预览「改完是几级、什么段位」，避免拍脑袋填错。
      60 级封顶（高阶段位 26 级起：王者→传奇→神话→圣皇→神王→永恒）。 */
-  $('#aExpSet').onclick=()=>{
+  $s('#aExpSet').onclick=()=>{
     const li=lvInfo(x.exp||0);
     cOpen(`<div style="font-weight:800;font-size:16px;color:#1f2940;margin-bottom:6px">📈 修改经验值</div>
       <div style="font-size:12.5px;color:#55617c;line-height:1.7;margin-bottom:10px">
@@ -4830,8 +4932,8 @@ function admPanel(i){
     Array.prototype.forEach.call(document.querySelectorAll('[data-q]'),b=>{
       b.onclick=()=>{ inp.value=String(LVTAB[Math.max(0,Math.min(LVTAB.length-1,Number(b.dataset.q)-1))]||0); preview(); };
     });
-    $('#aeBack').onclick=()=>admPanel(i);
-    $('#aeGo').onclick=async()=>{
+    $s('#aeBack').onclick=()=>admPanel(i);
+    $s('#aeGo').onclick=async()=>{
       const v=Math.max(0,Math.floor(Number(inp.value)||0));
       if(!v){$('#aeMsg').textContent='经验值要大于 0（要清零请用「经验清零」）';return}
       $('#aeGo').disabled=true;$('#aeGo').textContent='修改中…';
@@ -4850,10 +4952,10 @@ function admPanel(i){
       }else{$('#aeMsg').textContent=msg;$('#aeGo').disabled=false;$('#aeGo').textContent='确认修改'}
     };
   };
-  $('#aEx').onclick=()=>admForm(i,{icon:'📉',title:'经验清零',desc:`将 <b>${x.acc_id}</b> 的经验值清零（等级、排行榜名次随之重置）。用于处理刷分账号。`,confirm:true,action:'resetexp'});
-  $('#aRs').onclick=()=>admForm(i,{icon:'♻️',title:'重置学习进度',desc:`<b>清空该账号全部学习数据</b>：进度、答题统计、打卡历史、错题本、熟练度、经验，全部归零且不可恢复。仅在换人使用此账号时使用！`,confirm:true,action:'resetprog'});
-  $('#aBn').onclick=()=>admForm(i,x.banned?{icon:'✅',title:'解除封禁',desc:`恢复 <b>${x.acc_id}</b> 的登录权限。`,action:'unban'}:{icon:'🚫',title:'封禁账号',desc:`禁止 <b>${x.acc_id}</b> 登录（学习数据保留）。用于处理违规账号。`,confirm:true,action:'ban'});
-  $('#aDel').onclick=()=>admForm(i,{icon:'🗑️',title:'删除账号',desc:`<b>彻底删除</b> <b>${x.acc_id}</b> 的云端账号和全部数据，<b>不可恢复</b>！为防误删，请输入该账号的完整 ID 确认。`,input:true,ph:'输入账号 ID 以确认删除',action:'delete',match:x.acc_id});
+  $s('#aEx').onclick=()=>admForm(i,{icon:'📉',title:'经验清零',desc:`将 <b>${x.acc_id}</b> 的经验值清零（等级、排行榜名次随之重置）。用于处理刷分账号。`,confirm:true,action:'resetexp'});
+  $s('#aRs').onclick=()=>admForm(i,{icon:'♻️',title:'重置学习进度',desc:`<b>清空该账号全部学习数据</b>：进度、答题统计、打卡历史、错题本、熟练度、经验，全部归零且不可恢复。仅在换人使用此账号时使用！`,confirm:true,action:'resetprog'});
+  $s('#aBn').onclick=()=>admForm(i,x.banned?{icon:'✅',title:'解除封禁',desc:`恢复 <b>${x.acc_id}</b> 的登录权限。`,action:'unban'}:{icon:'🚫',title:'封禁账号',desc:`禁止 <b>${x.acc_id}</b> 登录（学习数据保留）。用于处理违规账号。`,confirm:true,action:'ban'});
+  $s('#aDel').onclick=()=>admForm(i,{icon:'🗑️',title:'删除账号',desc:`<b>彻底删除</b> <b>${x.acc_id}</b> 的云端账号和全部数据，<b>不可恢复</b>！为防误删，请输入该账号的完整 ID 确认。`,input:true,ph:'输入账号 ID 以确认删除',action:'delete',match:x.acc_id});
 }
 /* ---------- 后台：背包摘要 ---------- */
 /* 只有这 6 项是真正「可数的背包道具」。
@@ -5114,9 +5216,9 @@ async function admForm(i,cfg){
     <div id="afMsg" style="font-size:12px;color:#ef4444;min-height:16px;margin-bottom:6px"></div>
     <button class="bigBtn" id="afGo">确认执行</button>
     <button class="bigBtn ghost" id="afBack" style="margin-top:8px">返回</button>`);
-  $('#afBack').onclick=()=>admPanel(i);
+  $s('#afBack').onclick=()=>admPanel(i);
   if(cfg.input&&$('#afV'))$('#afV').focus();
-  $('#afGo').onclick=async()=>{
+  $s('#afGo').onclick=async()=>{
     const v=cfg.input?(($('#afV').value||'').trim()):null;
     if(cfg.match&&v!==cfg.match){$('#afMsg').textContent='输入的账号 ID 不匹配，请核对后重新输入';return}
     if(cfg.input&&!v){$('#afMsg').textContent='请输入内容';return}
@@ -5133,7 +5235,7 @@ async function admFeedback(){
   cOpen(`<div style="font-weight:800;font-size:16px;color:#1f2940;margin-bottom:8px">📨 反馈管理</div>
     <div id="fbList" style="max-height:56vh;overflow:auto;font-size:12px;color:#8a95ad">加载中…</div>
     <button class="bigBtn ghost" id="fbBack" style="margin-top:8px">返回总表</button>`);
-  $('#fbBack').onclick=()=>admRender();
+  $s('#fbBack').onclick=()=>admRender();
   const r=await rpc('wc_admin2',{p_admin:ADM.pw,p_action:'fb_list'});
   const list=(r.ok&&r.data&&r.data.ok)?(r.data.data||[]):[];
   const box=$('#fbList'); if(!box)return;
@@ -5173,12 +5275,12 @@ function admNews(){
     <div id="nwMsg" style="font-size:12px;color:#ef4444;min-height:16px;margin-top:6px"></div>
     <button class="bigBtn" id="nwGo">📢 发布</button>
     <button class="bigBtn ghost" id="nwBack" style="margin-top:8px">返回总表</button>`);
-  $('#nwBack').onclick=()=>admRender();
+  $s('#nwBack').onclick=()=>admRender();
   const kw=$('#nwK');
   const drawK=()=>{kw.innerHTML=KINDS.map(k=>'<button data-k="'+k[0]+'" style="flex:1;padding:7px;border-radius:999px;border:1.5px solid '+(kind===k[0]?'#4f6ef7':'#dde3f0')+';background:'+(kind===k[0]?'#eef2ff':'#fff')+';color:'+(kind===k[0]?'#4f6ef7':'#55617c')+';font-size:12px;font-weight:700;cursor:pointer">'+k[1]+'</button>').join('');
     kw.querySelectorAll('[data-k]').forEach(b=>{b.onclick=()=>{kind=b.dataset.k;drawK()}})};
   drawK();
-  $('#nwGo').onclick=async()=>{
+  $s('#nwGo').onclick=async()=>{
     const t=($('#nwT').value||'').trim(),b=($('#nwB').value||'').trim();
     if(t.length<2||b.length<2){$('#nwMsg').textContent='标题和正文都要写一点';return}
     $('#nwGo').disabled=true;$('#nwGo').textContent='发布中…';
@@ -5293,7 +5395,7 @@ function showLock(k){
   $('#lkT').textContent=o.t;$('#lkP').textContent=o.p;
   $('#lockMask').style.display='flex';
 }
-$('#lkBtn').onclick=()=>{$('#lockMask').style.display='none';go('scr-home');renderHome()};
+$s('#lkBtn').onclick=()=>{$('#lockMask').style.display='none';go('scr-home');renderHome()};
 function renderLimBar(){
   const el=$('#limBar');if(!el)return;
   if(!limit.on){el.style.display='none'}
@@ -5324,7 +5426,7 @@ function renderLimit(){
         <div class="pinRow"><input id="pinIn" type="password" inputmode="numeric" placeholder="家长口令"><button id="pinGo">确定</button></div>
         <div id="pinMsg" style="font-size:12px;color:#ef4444;margin-top:8px;min-height:16px"></div>
         <div class="psNote">没有口令改不了设置，孩子误点进来也没关系。</div></div>`;
-    $('#pinGo').onclick=()=>{
+    $s('#pinGo').onclick=()=>{
       const v=$('#pinIn').value.trim();
       if(firstUse){
         if(v.length<4){$('#pinMsg').textContent='口令至少 4 位';$('#pinIn').value='';return}
@@ -5360,13 +5462,13 @@ function renderLimit(){
         <button id="pinSave">保存</button></div>
       <div id="pinMsg" style="font-size:12px;color:#ef4444;margin-top:8px;min-height:16px"></div></div>
     <div class="psNote">限额只针对练习；成长中心、错词本、分享卡、老师题库导入仍可随时查看。</div>`;
-  $('#limOnBtn').onclick=()=>{limit.on=!limit.on;raw.set('limit',limit);renderLimit();renderHome();toast(limit.on?'已开启限额':'已关闭限额')};
+  $s('#limOnBtn').onclick=()=>{limit.on=!limit.on;raw.set('limit',limit);renderLimit();renderHome();toast(limit.on?'已开启限额':'已关闭限额')};
   b.querySelectorAll('[data-r]').forEach(x=>x.onclick=()=>{limit.r=+x.dataset.r;raw.set('limit',limit);renderLimit();renderHome()});
   b.querySelectorAll('[data-m]').forEach(x=>x.onclick=()=>{limit.m=+x.dataset.m;raw.set('limit',limit);renderLimit();renderHome()});
   b.querySelectorAll('[data-et]').forEach(x=>x.onclick=()=>{eyecfg.tip=+x.dataset.et;raw.set('eyecfg',eyecfg);renderLimit()});
   b.querySelectorAll('[data-ec]').forEach(x=>x.onclick=()=>{eyecfg.cont=+x.dataset.ec;raw.set('eyecfg',eyecfg);renderLimit()});
   b.querySelectorAll('[data-ed]').forEach(x=>x.onclick=()=>{eyecfg.day=+x.dataset.ed;raw.set('eyecfg',eyecfg);renderLimit();renderHome()});
-  $('#pinSave').onclick=()=>{
+  $s('#pinSave').onclick=()=>{
     const v=$('#newPin').value.trim(),msg=$('#pinMsg');
     if(v.length<4){msg.style.color='#ef4444';msg.textContent='口令至少 4 位';return}
     pin=v;raw.set('pin',pin);$('#newPin').value='';
@@ -5445,7 +5547,7 @@ function showEye(kind,onDone){
       }else $('#eyeCnt').textContent=_fmtms(sec);
     },500);
   }else{
-    $('#eyeHome').onclick=()=>{sTap();done();go('scr-home');if(window.renderHome)renderHome()};
+    $s('#eyeHome').onclick=()=>{sTap();done();go('scr-home');if(window.renderHome)renderHome()};
   }
 }
 
@@ -5536,10 +5638,9 @@ const PET_IMGS={
 };
 const petImgSrc=k=>(PET_IMGS[k]||PET_IMGS.chick);
 /* ---------- 宠物视觉成长：等级越高体型越大 + 高等级加发光 ----------
-   低等级（Lv1-5）= 幼体，缩到 0.78 倍，弱弱地蹲在屋前；
-   中等级（Lv6-19）= 成体 0.78→1.12 线性长；
-   高等级（Lv20+）= 1.12 起步继续长到 1.5 倍，并叠一层金色光晕（越高级越亮）。
-   这样「升级」在首页院子/宠物页都是**看得见**的变化，而不只是数字变大。 */
+   [2026-10-06 更新] 体型已改为 PET_TIERS 的 8 档**绝对像素**（30/40/…/120px），不再用倍数
+   （倍数制实测 Lv1 只有 7px，放在食盆旁像小虫子，用户看图后要求重定）。
+   等级取 petObj.pets[k].lv（见 pmPetLvOf）；花园两只都由 pmStart 画成 .pmWalk，会走动、体型随等级变。 */
 /* 当前展示宠物（p）的等级：优先 p.lv，其次从 pets 映射里取 */
 function pmPetLv(p){
   if(!p) return 1;
@@ -5665,12 +5766,12 @@ let rushDiff=store.get('rushDiff','normal');
 function showRushDiff(){
   $('#diffList').innerHTML=RUSHLV.map(d=>`<button class="diffBtn${d.k===rushDiff?' on':''}" data-d="${d.k}">
     <b>${d.icon} ${d.n} · ${d.sec} 秒</b><span>${d.desc}</span></button>`).join('');
-  $('#diffList').onclick=e=>{const b=e.target.closest('[data-d]');if(!b)return;sTap();
+  $s('#diffList').onclick=e=>{const b=e.target.closest('[data-d]');if(!b)return;sTap();
     rushDiff=b.dataset.d;store.set('rushDiff',rushDiff);
     $('#diffMask').style.display='none';startRushNow()};
   $('#diffMask').style.display='flex';
 }
-$('#diffCancel').onclick=()=>{sTap();$('#diffMask').style.display='none'};
+$s('#diffCancel').onclick=()=>{sTap();$('#diffMask').style.display='none'};
 function startRushNow(){
   const k=limitHit();if(k){showLock(k);return}
   startPlayClock();
@@ -5684,13 +5785,22 @@ function startRushNow(){
   nextQ();
 }
 
-/* 启动：确保有档案并载入该档案的数据 */
-ensureUser();
-loadAll(raw.get('cur',USERS[0]?USERS[0].id:null));
-tmBoot();
-cloudPullCurrent();
-setTimeout(maybeFirstRunCloud, 900);   // 首次打开弹出登录/注册窗口
-resolveActivePack();   // 载入已保存的课本包（默认内置外研版八上）
+/* 启动：确保有档案并载入该档案的数据
+   [2026-10-06 加保护] 以前这几步是裸调用，**任何一步抛错后面全部不执行** ——
+   一处 TDZ/空引用就把整条启动链打断（用户报「导航栏没出来」，就是这么来的）。
+   现在每步各自 try/catch：坏一个只少那个功能，页面照常起来。 */
+function _bootStep(name, fn){
+  try{ return fn(); }
+  catch(e){ console.warn('[启动] '+name+' 出错，已跳过：', e); return null; }
+}
+_bootStep('确保有档案', function(){ ensureUser(); });
+_bootStep('载入档案', function(){ loadAll(raw.get('cur',USERS[0]?USERS[0].id:null)); });
+_bootStep('陪伴时长', function(){ tmBoot(); });
+_bootStep('云端拉取', function(){ cloudPullCurrent(); });
+_bootStep('首次登录引导', function(){ setTimeout(function(){
+  try{ maybeFirstRunCloud(); }catch(e){ console.warn('[启动] 首次登录引导出错：', e); }
+}, 900); });
+_bootStep('课本包', function(){ resolveActivePack(); });
 
 /* ================= AUDIO ================= */
 let AC=null;
@@ -5868,17 +5978,17 @@ $('#lvGrid').addEventListener('click',e=>{
   if(t.dataset.act==='core'){coreOnly=true;store.set('core',true);sTap();renderHome()}
   if(t.dataset.act==='all'){coreOnly=false;store.set('core',false);sTap();renderHome()}
 });
-$('#btnWrong').onclick=()=>{renderWrong();go('scr-wrong')};
-$('#btnUser').onclick=()=>{renderLogin();go('scr-login')};
-$('#btnSwitch').onclick=e=>{e.stopPropagation();renderLogin();go('scr-login')};
-$('#btnMe').onclick=()=>{renderMe();go('scr-me')};
-$('#btnBank').onclick=()=>{renderBanks();go('scr-import')};
-$('#btnUnit').onclick=()=>{startUnit()};
-$('#btnDaily').onclick=()=>{startDaily()};
-$('#btnLimit').onclick=()=>{renderLimit();go('scr-limit')};
-$('#btnNews').onclick=()=>{renderNewsPage();newsSeen();go('scr-news')};   /* [v3.8] 进广场＝看过了，红点随列表加载完一起熄 */
-$('#btnLimBack').onclick=()=>{go('scr-home');renderHome()};
-$('#tabbar').onclick=e=>{
+$s('#btnWrong').onclick=()=>{renderWrong();go('scr-wrong')};
+$s('#btnUser').onclick=()=>{renderLogin();go('scr-login')};
+$s('#btnSwitch').onclick=e=>{e.stopPropagation();renderLogin();go('scr-login')};
+$s('#btnMe').onclick=()=>{renderMe();go('scr-me')};
+$s('#btnBank').onclick=()=>{renderBanks();go('scr-import')};
+$s('#btnUnit').onclick=()=>{startUnit()};
+$s('#btnDaily').onclick=()=>{startDaily()};
+$s('#btnLimit').onclick=()=>{renderLimit();go('scr-limit')};
+$s('#btnNews').onclick=()=>{renderNewsPage();newsSeen();go('scr-news')};   /* [v3.8] 进广场＝看过了，红点随列表加载完一起熄 */
+$s('#btnLimBack').onclick=()=>{go('scr-home');renderHome()};
+$s('#tabbar').onclick=e=>{
   const b=e.target.closest('.tb');if(!b)return;sTap();
   const t=b.dataset.tab;
   if(t==='home'){renderHome();try{newsUnreadRefresh()}catch(e){};go('scr-home')}
@@ -5887,9 +5997,9 @@ $('#tabbar').onclick=e=>{
   else if(t==='wrong'){renderWrong();go('scr-wrong')}
   else{renderMe();go('scr-me')}
 };
-$('#btnFrBack').onclick=()=>{renderHome();go('scr-home')};
-$('#btnPetBack').onclick=()=>{renderHome();go('scr-home')};
-$('#btnNewsBack').onclick=()=>{newsSeen();renderHome();try{newsUnreadRefresh()}catch(e){};go('scr-home')};
+$s('#btnFrBack').onclick=()=>{renderHome();go('scr-home')};
+$s('#btnPetBack').onclick=()=>{renderHome();go('scr-home')};
+$s('#btnNewsBack').onclick=()=>{newsSeen();renderHome();try{newsUnreadRefresh()}catch(e){};go('scr-home')};
 
 /* ================= 今日一练（混合卷） ================= */
 let MIX=null;
@@ -5967,7 +6077,7 @@ function renderMixedQ(){
       <div class="qWord"><div class="big">${v.b}</div><div class="ph">${v.cn} · 请选出它的${askP?'过去式':'过去分词'}</div>
       <div style="margin-top:10px"><button class="spk" id="qSpk">🔊</button></div></div>
       <div class="opts" id="optWrap"></div>`;
-    $('#qSpk').onclick=()=>{sTap();say(v.b)};say(v.b);
+    $s('#qSpk').onclick=()=>{sTap();say(v.b)};say(v.b);
     let done=false;const wrap=$('#optWrap');
     opts.forEach(o=>{const b=document.createElement('button');b.className='opt';b.textContent=o;if(o===ans)b.dataset.ok='1';
       b.onclick=()=>{if(done)return;done=true;stopTimer();
@@ -5989,7 +6099,7 @@ function renderMixedQ(){
       <div class="qWord"><div class="big">${e.w}</div><div class="ph">${e.ph||'&nbsp;'}</div>
       <div style="margin-top:10px"><button class="spk" id="qSpk">🔊</button></div></div>
       <div class="opts" id="optWrap"></div>`;
-    $('#qSpk').onclick=()=>{sTap();say(e.w)};say(e.w);
+    $s('#qSpk').onclick=()=>{sTap();say(e.w)};say(e.w);
     let done=false;const wrap=$('#optWrap');
     opts.forEach(cn=>{const b=document.createElement('button');b.className='opt';b.textContent=cn;if(cn===e.cn)b.dataset.ok='1';
       b.onclick=()=>{if(done)return;done=true;stopTimer();
@@ -6205,7 +6315,7 @@ function renderQ1(){
       <div style="margin-top:10px"><button class="spk" id="qSpk">🔊</button></div>
     </div>
     <div class="opts" id="optWrap"></div>`;
-  $('#qSpk').onclick=()=>{sTap();say(e.w)};
+  $s('#qSpk').onclick=()=>{sTap();say(e.w)};
   say(e.w);
   const wrap=$('#optWrap');
   let done=false;
@@ -6256,7 +6366,7 @@ function renderQ2(){
     </div>
     <div class="hintRow"><button class="hintBtn" id="hintBtn">💡 提示（首字母）</button></div>
     <div class="feedback" id="fb"></div>`;
-  $('#qSpk').onclick=()=>{sTap();say(e.w,.8)};
+  $s('#qSpk').onclick=()=>{sTap();say(e.w,.8)};
   setTimeout(()=>say(e.w,.8),350);
   const inp=$('#typeIn');
   setTimeout(()=>{try{inp.focus()}catch(x){}},500);
@@ -6281,9 +6391,9 @@ function renderQ2(){
       sNO();say(e.w,.7);
     }
   }
-  $('#typeGo').onclick=check;
+  $s('#typeGo').onclick=check;
   inp.onkeydown=ev=>{if(ev.key==='Enter')check()};
-  $('#hintBtn').onclick=()=>{hinted=true;fb.textContent=`提示：${e.w[0]}${'_'.repeat(Math.max(1,e.w.length-2))}${e.w[e.w.length-1]}`;fb.className='feedback';sTap()};
+  $s('#hintBtn').onclick=()=>{hinted=true;fb.textContent=`提示：${e.w[0]}${'_'.repeat(Math.max(1,e.w.length-2))}${e.w[e.w.length-1]}`;fb.className='feedback';sTap()};
   startTimer(30,()=>{
     bumpMastery(e.w,false);addWrong(e.w,G.level+1);G.wrongRound.push(e);G.wrongRoundMeta=G.wrongRoundMeta||[];
     fb.textContent=`⏰ 超时！答案是 ${e.w}`;fb.className='feedback no';sNO();
@@ -6441,7 +6551,7 @@ function renderQ4(){
       sNO();
     }
   }
-  $('#hintBtn').onclick=()=>{
+  $s('#hintBtn').onclick=()=>{
     if(hintUsed)return;
     hintUsed=true;sTap();
     $('#hintBtn').disabled=true;$('#hintBtn').style.opacity='.45';$('#hintBtn').textContent='💡 提示已用';
@@ -6472,7 +6582,7 @@ function showNextBtn(){
   const hr=document.createElement('div');hr.className='hintRow';
   hr.innerHTML='<button class="hintBtn" id="btnNextQ" style="background:#4f6ef7;color:#fff;border-color:#4f6ef7;opacity:1">下一题 →</button>';
   $('#gArea').appendChild(hr);
-  $('#btnNextQ').onclick=()=>{sTap();nextQ()};
+  $s('#btnNextQ').onclick=()=>{sTap();nextQ()};
 }
 function renderQ5(){
   const p=G.pList[G.idx-1];
@@ -6487,7 +6597,7 @@ function renderQ5(){
       <div style="margin-top:10px"><button class="spk" id="qSpk">🔊</button></div>
     </div>
     <div class="opts" id="optWrap"></div>`;
-  $('#qSpk').onclick=()=>{sTap();say(p.en.replace(/[.\/]/g,' '),.8)};
+  $s('#qSpk').onclick=()=>{sTap();say(p.en.replace(/[.\/]/g,' '),.8)};
   say(p.en.replace(/[.\/]/g,' '),.8);
   const wrap=$('#optWrap');let done=false;
   const fin=(htm)=>{wrap.querySelectorAll('.opt').forEach(o=>o.style.pointerEvents='none');
@@ -6607,7 +6717,7 @@ function renderQ7(){
       slotWrap.classList.add('shake');setTimeout(()=>slotWrap.classList.remove('shake'),400);sNO();
     }
   }
-  $('#btn_done').onclick=check;
+  $s('#btn_done').onclick=check;
   draw();
   startTimer(60,()=>{
     statWrong();pushWrong(s.w.join(' '),s.cn,s.w.join(' '));
@@ -6636,7 +6746,7 @@ function renderQ8(){
       <button class="bigBtn" id="vGo" style="padding:0 18px;flex:none">确定</button>
     </div>
     <div class="feedback" id="vFb" style="min-height:22px"></div>`;
-  $('#qSpk').onclick=()=>{sTap();say(v.b)};
+  $s('#qSpk').onclick=()=>{sTap();say(v.b)};
   say(v.b);
   const inp=$('#vIn'),fb=$('#vFb');let done=false;
   function judge(){
@@ -6657,7 +6767,7 @@ function renderQ8(){
       setTimeout(nextQ,2100);
     }
   }
-  $('#vGo').onclick=judge;
+  $s('#vGo').onclick=judge;
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();judge()}};
   setTimeout(()=>{try{inp.focus()}catch(e){}},350);
   startTimer(40,()=>{if(done)return;done=true;
@@ -6814,7 +6924,7 @@ function renderQ11(){
     </div>
     <div class="hintRow"><button class="hintBtn" id="hintBtn">💡 提示（开头两个词）</button></div>
     <div class="feedback" id="fb"></div>`;
-  $('#qSpk').onclick=()=>{sTap();say(full,.85)};
+  $s('#qSpk').onclick=()=>{sTap();say(full,.85)};
   setTimeout(()=>say(full,.85),350);
   const inp=$('#typeIn'),fb=$('#fb');
   setTimeout(()=>{try{inp.focus()}catch(x){}},500);
@@ -6837,9 +6947,9 @@ function renderQ11(){
       sNO();say(full,.75);
     }
   }
-  $('#typeGo').onclick=check;
+  $s('#typeGo').onclick=check;
   inp.onkeydown=ev=>{if(ev.key==='Enter')check()};
-  $('#hintBtn').onclick=()=>{hinted=true;fb.textContent='提示：'+s.w.slice(0,2).join(' ')+' …';fb.className='feedback';sTap()};
+  $s('#hintBtn').onclick=()=>{hinted=true;fb.textContent='提示：'+s.w.slice(0,2).join(' ')+' …';fb.className='feedback';sTap()};
   startTimer(60,()=>{
     pushWrong(full,s.cn,full);
     fb.textContent='⏰ 超时！原句：'+full;fb.className='feedback no';
@@ -6872,7 +6982,7 @@ function renderReviewQ(){
       <div class="qWord"><div class="big">${e.w}</div><div class="ph">${e.ph||'&nbsp;'}</div>
       <div style="margin-top:10px"><button class="spk" id="qSpk">🔊</button></div></div>
       <div class="opts" id="optWrap"></div>`;
-    $('#qSpk').onclick=()=>{sTap();say(e.w)};
+    $s('#qSpk').onclick=()=>{sTap();say(e.w)};
     const wrap=$('#optWrap');let done=false;
     opts.forEach(cn=>{
       const b=document.createElement('button');b.className='opt';b.textContent=cn;if(cn===e.cn)b.dataset.ok='1';
@@ -7004,8 +7114,8 @@ function renderWrong(){
       <div class="r"><div class="cnt">✗ ${wrongBook[e.w].c} 次</div><div class="lv">${L?L.icon+' '+L.name:''}</div></div></div>`;
   }).join('');
 }
-$('#btnReview').onclick=()=>{sTap();startReview()};
-$('#btnClear').onclick=()=>{
+$s('#btnReview').onclick=()=>{sTap();startReview()};
+$s('#btnClear').onclick=()=>{
   if(confirm('确定清空错词本吗？')){
     wrongBook={};store.set('wrong',wrongBook);
     renderWrong();toast('已清空 ✅');
@@ -7013,10 +7123,10 @@ $('#btnClear').onclick=()=>{
 };
 
 /* ---------- nav ---------- */
-$('#btnBack').onclick=()=>{stopTimer();stopPlayClock();if(rushTmr){clearInterval(rushTmr);rushTmr=null}try{speechSynthesis.cancel()}catch(e){};go('scr-home');renderHome()};
-$('#btnWBack').onclick=()=>{go('scr-home');renderHome()};
-$('#btnHome').onclick=()=>{go('scr-home');renderHome()};
-$('#btnAgain').onclick=()=>{
+$s('#btnBack').onclick=()=>{stopTimer();stopPlayClock();if(rushTmr){clearInterval(rushTmr);rushTmr=null}try{speechSynthesis.cancel()}catch(e){};go('scr-home');renderHome()};
+$s('#btnWBack').onclick=()=>{go('scr-home');renderHome()};
+$s('#btnHome').onclick=()=>{go('scr-home');renderHome()};
+$s('#btnAgain').onclick=()=>{
   if(!G)return;
   if(G.mode==='review')startReview();
   else if(G.mode==='daily')startDaily();
@@ -7025,7 +7135,7 @@ $('#btnAgain').onclick=()=>{
   else if(G.level===8)startRushNow();      // 抢答沿用刚才选的难度
   else startLevel(G.level);
 };
-$('#btnNext').onclick=()=>{
+$s('#btnNext').onclick=()=>{
   if(!G)return;
   if(G.mode==='review')startReview();
   else if(G.mode==='daily')startDaily();
@@ -7119,7 +7229,7 @@ async function logoutAccount(opt){
   }catch(e){}
 }
 /* 个人资料统一入口：首页「✏️ 修改资料」按钮（成长中心那个卡片走的是同一个云函数） */
-$('#btnPfEdit').onclick=()=>{ if(document.activeElement&&document.activeElement.blur)document.activeElement.blur(); openProfilePanel(); };
+$s('#btnPfEdit').onclick=()=>{ if(document.activeElement&&document.activeElement.blur)document.activeElement.blur(); openProfilePanel(); };
 async function refreshSocialAfterProfile(){
   try{ renderFriendsBoard(); }catch(e){}
   try{ const fe=document.getElementById('scr-friend'); if(fe&&fe.classList.contains('active'))await renderFriendPage(); }catch(e){}
@@ -7128,11 +7238,11 @@ async function refreshSocialAfterProfile(){
    免注册号（自动发的本机号）还没连上云端时 cloudLink() 是 null，
    结果只弹一句 toast 就退出了 —— 界面纹丝不动，看起来就是「按钮坏了」。
    现在三个入口统一走 logoutAccount()，无论有没有云账号都一定要落到「回到游客 + 说清楚发生了什么」。 */
-$('#btnLogoutCloud').onclick=()=>logoutAccount();
+$s('#btnLogoutCloud').onclick=()=>logoutAccount();
 /* [2026-10-06 新增] 「登录云账号」按钮（与退出账号并排）。
    未登录 → 直接打开登录窗；已登录 → 提示「当前已登录 XX，先退出再换一个」，
    免得点了没反应以为是坏的。按钮文案也跟着登录状态变。 */
-$('#btnLoginCloud').onclick=()=>{
+$s('#btnLoginCloud').onclick=()=>{
   const lk=cloudLink();
   if(lk){ toast('当前已登录 '+lk.aid+'，如要换账号请先点「退出账号」'); return; }
   try{ cloudLoginForm(); }catch(e){ try{ renderLogin(); go('scr-login'); }catch(e2){ toast('请下拉页面点「登录 / 注册」'); } }
@@ -7164,10 +7274,10 @@ function maybeFirstRunCloud(){
   /* 2026-10-06：只有点「帮我自动建个账号」才现造一个号并亮出来。
      以前是「点跳过 → 后台偷偷建档」+「进关卡 → 再建档一次」，
      同学已经登录的账号就是这么被顶掉的。现在建档这条路全变成手动，一步不多走。 */
-  $('#frAnon').onclick=()=>{ raw.set('cloudSkipped',true); anonManualCreate(); };
-  $('#frReg').onclick=()=>{ raw.set('cloudSkipped',true); cloudRegister(); };
-  $('#frLogin').onclick=()=>{ raw.set('cloudSkipped',true); cloudLoginForm(); };
-  $('#frSkip').onclick=()=>{
+  $s('#frAnon').onclick=()=>{ raw.set('cloudSkipped',true); anonManualCreate(); };
+  $s('#frReg').onclick=()=>{ raw.set('cloudSkipped',true); cloudRegister(); };
+  $s('#frLogin').onclick=()=>{ raw.set('cloudSkipped',true); cloudLoginForm(); };
+  $s('#frSkip').onclick=()=>{
     raw.set('cloudSkipped',true); cClose();
     /* 2026-10-06：跳过就是纯游客，一个号都不造、不上云，玩得照样。 */
   };
@@ -7304,9 +7414,9 @@ function anonCard(){
       <button class="bigBtn" id="akGo" style="flex:1">知道了，直接玩</button>
     </div>
     <div id="akSwitch" style="text-align:center;font-size:12.5px;color:#8a95ad;margin-top:12px;cursor:pointer">🔄 切换本机其它号 / 手动同步 ›</div>`);
-  $('#akCopy').onclick=function(){ var ok=anonCopy('账号 '+r.aid+'\n密码 '+r.pw); toast(ok?'已复制，存好别丢':'复制不了，手抄一下：'+r.aid+' / '+r.pw); };
-  $('#akGo').onclick=function(){ raw.set('anonCardSeen',true); cClose(); };
-  $('#akSwitch').onclick=function(){ raw.set('anonCardSeen',true); anonSwitchForm(); };
+  $s('#akCopy').onclick=function(){ var ok=anonCopy('账号 '+r.aid+'\n密码 '+r.pw); toast(ok?'已复制，存好别丢':'复制不了，手抄一下：'+r.aid+' / '+r.pw); };
+  $s('#akGo').onclick=function(){ raw.set('anonCardSeen',true); cClose(); };
+  $s('#akSwitch').onclick=function(){ raw.set('anonCardSeen',true); anonSwitchForm(); };
 }
 function anonSwitchForm(){
   var ls=[]; try{ ls=(window.KVCloud&&KVCloud.anon)?KVCloud.anon.list():[]; }catch(e){ ls=[]; }
@@ -7326,9 +7436,9 @@ function anonSwitchForm(){
     <button class="bigBtn ghost" id="akSyncNow" style="margin-top:12px">☁️ 现在把进度同步到云端</button>
     <button class="bigBtn" id="akBack" style="margin-top:9px">返回</button>`);
   document.querySelectorAll('[data-sw]').forEach(function(b){ b.onclick=function(){ anonDoSwitch(b.getAttribute('data-sw')); }; });
-  $('#akNew').onclick=function(){ anonManualCreate(); };   /* 2026-10-06 手动建号入口 */
-  $('#akBack').onclick=function(){ if(raw.get('anonCardSeen',false)){ cClose(); } else { anonCard(); } };
-  $('#akSyncNow').onclick=function(){
+  $s('#akNew').onclick=function(){ anonManualCreate(); };   /* 2026-10-06 手动建号入口 */
+  $s('#akBack').onclick=function(){ if(raw.get('anonCardSeen',false)){ cClose(); } else { anonCard(); } };
+  $s('#akSyncNow').onclick=function(){
     try{ if(typeof cloudPush==='function') cloudPush(); }catch(e){}
     toast('已提交，等一会儿就同步好');
   };
@@ -7495,19 +7605,19 @@ function renderMe(){
     <div class="btnCol">
       <button class="bigBtn" id="btnShareCard">🎖️ 生成战绩勋章卡</button>
     </div>`;
-  $('#btnShareCard').onclick=()=>{cardFrom='me';cardStyle=0;drawCard();go('scr-share')};
+  $s('#btnShareCard').onclick=()=>{cardFrom='me';cardStyle=0;drawCard();go('scr-share')};
   const _mh=$('#meHeroAcc');
   if(_mh) _mh.onclick=()=>openAccPanel();
-  if($('#btnCloudReg'))$('#btnCloudReg').onclick=()=>cloudRegister();
-  if($('#btnAnonSwitch'))$('#btnAnonSwitch').onclick=()=>anonSwitchForm();
-  if($('#btnCloudLogin'))$('#btnCloudLogin').onclick=()=>cloudLoginForm();
-  if($('#btnCloudProfile'))$('#btnCloudProfile').onclick=()=>cloudProfileForm();
-  if($('#btnCloudAdmin'))$('#btnCloudAdmin').onclick=()=>cloudAdmin();
-  if($('#btnCloudLogout'))$('#btnCloudLogout').onclick=()=>logoutAccount();
+  if($('#btnCloudReg'))$s('#btnCloudReg').onclick=()=>cloudRegister();
+  if($('#btnAnonSwitch'))$s('#btnAnonSwitch').onclick=()=>anonSwitchForm();
+  if($('#btnCloudLogin'))$s('#btnCloudLogin').onclick=()=>cloudLoginForm();
+  if($('#btnCloudProfile'))$s('#btnCloudProfile').onclick=()=>cloudProfileForm();
+  if($('#btnCloudAdmin'))$s('#btnCloudAdmin').onclick=()=>cloudAdmin();
+  if($('#btnCloudLogout'))$s('#btnCloudLogout').onclick=()=>logoutAccount();
   /* 「🎁 点我自动建个本机号」按钮挂在资料卡生成处（renderProfileCard）上，这里不再重复绑 */
   meCalYM=null;renderCal();
-  $('#calPrev').onclick=()=>{calShift(-1)};
-  $('#calNext').onclick=()=>{calShift(1)};
+  $s('#calPrev').onclick=()=>{calShift(-1)};
+  $s('#calNext').onclick=()=>{calShift(1)};
 }
 let meCalYM=null;
 function calShift(d){
@@ -7550,8 +7660,8 @@ function renderMedals(){
   }).join('');
   try{renderFriendsBoard()}catch(e){}
 }
-$('#btnMBack').onclick=()=>{go('scr-home');renderHome()};
-$('#btnToCard').onclick=()=>{cardFrom='medals';cardStyle=0;syncCardSeg();drawCard();go('scr-share')};
+$s('#btnMBack').onclick=()=>{go('scr-home');renderHome()};
+$s('#btnToCard').onclick=()=>{cardFrom='medals';cardStyle=0;syncCardSeg();drawCard();go('scr-share')};
 /* 点勋章弹大图 */
 function showMedalBig(lv){
   /* [2026-10-06 改] MEDALS 现在是「段位」表（15 项，lv 存段位起始等级），
@@ -7566,9 +7676,9 @@ function showMedalBig(lv){
   $('#mbState').style.color=on?'#10b981':'#8a95ad';
   $('#medalBig').style.display='flex';sTap();
 }
-$('#medalWall').onclick=e=>{const c=e.target.closest('[data-lv]');if(c)showMedalBig(+c.dataset.lv)};
-$('#mbClose').onclick=()=>{$('#medalBig').style.display='none'};
-$('#medalBig').onclick=e=>{if(e.target.id==='medalBig')$('#medalBig').style.display='none'};
+$s('#medalWall').onclick=e=>{const c=e.target.closest('[data-lv]');if(c)showMedalBig(+c.dataset.lv)};
+$s('#mbClose').onclick=()=>{$('#medalBig').style.display='none'};
+$s('#medalBig').onclick=e=>{if(e.target.id==='medalBig')$('#medalBig').style.display='none'};
 
 /* ================= 好友榜（勋章墙下方 · 云端全玩家数据） ================= */
 function friendsGet(){ const l=raw.get('friends',[]); return Array.isArray(l)?l:[]; }
@@ -7934,7 +8044,7 @@ function drawCard(cb){
   return c;
 }
 let lastCard=null;
-$('#btnSaveImg').onclick=()=>{
+$s('#btnSaveImg').onclick=()=>{
   const doSave=c=>{
     const nm='战绩勋章_'+((USERS.find(x=>x.id===UID)||{}).name||'我')+'.png';
     try{
@@ -7945,13 +8055,13 @@ $('#btnSaveImg').onclick=()=>{
   };
   lastCard?doSave(lastCard):drawCard(doSave);
 };
-$('#btnRedraw').onclick=()=>{cardStyle++;sTap();drawCard()};
-$('#cardSeg').onclick=e=>{const b=e.target.closest('[data-cs]');if(!b)return;sTap();
+$s('#btnRedraw').onclick=()=>{cardStyle++;sTap();drawCard()};
+$s('#cardSeg').onclick=e=>{const b=e.target.closest('[data-cs]');if(!b)return;sTap();
   cardLayout=+b.dataset.cs;store.set('cardLayout',cardLayout);syncCardSeg();drawCard()};
-$('#btnSBack').onclick=()=>{(cardFrom==='medals'?renderMedals():renderMe(),go(cardFrom==='medals'?'scr-medals':'scr-me'))};
-$('#btnMeBack').onclick=()=>{renderHome();go('scr-home')};
-$('#btnLBack').onclick=()=>{go('scr-home');renderHome()};
-$('#btnIBack').onclick=()=>{renderHome();go('scr-home')};
+$s('#btnSBack').onclick=()=>{(cardFrom==='medals'?renderMedals():renderMe(),go(cardFrom==='medals'?'scr-medals':'scr-me'))};
+$s('#btnMeBack').onclick=()=>{renderHome();go('scr-home')};
+$s('#btnLBack').onclick=()=>{go('scr-home');renderHome()};
+$s('#btnIBack').onclick=()=>{renderHome();go('scr-home')};
 
 /* ================= 老师题库：解析 / 导入 / 练习 ================= */
 function parseCSV(text){
@@ -8134,13 +8244,13 @@ function renderBookPacks(){
     }
   };
 }
-$('#btnBookJSONTpl').onclick=()=>{
+$s('#btnBookJSONTpl').onclick=()=>{
   dl(new Blob([exportBookJSON()],{type:'application/json;charset=utf-8'}),'课本包模板_'+(activePack.meta.grade||'示例')+'.json');
   toast('JSON 模板已下载（含当前内置课本全部内容，可改后导入）');
 };
-$('#btnBookCSVTpl').onclick=()=>{dl(new Blob([bookCSVTemplate()],{type:'text/csv;charset=utf-8'}),'课本包模板.csv');toast('CSV 模板已下载')};
-$('#btnBookImport').onclick=()=>{const t=$('#bookTxt').value.trim();if(!t){toast('先把课本包 JSON / CSV 粘贴进来 🙂');return}doImportBook(t)};
-$('#btnBookFile').onclick=()=>$('#bookFile').click();
+$s('#btnBookCSVTpl').onclick=()=>{dl(new Blob([bookCSVTemplate()],{type:'text/csv;charset=utf-8'}),'课本包模板.csv');toast('CSV 模板已下载')};
+$s('#btnBookImport').onclick=()=>{const t=$('#bookTxt').value.trim();if(!t){toast('先把课本包 JSON / CSV 粘贴进来 🙂');return}doImportBook(t)};
+$s('#btnBookFile').onclick=()=>$('#bookFile').click();
 $('#bookFile').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>doImportBook(String(r.result||''),f.name);r.readAsText(f,'utf-8');e.target.value=''};
 function doImportBook(text){
   text=(text||'').trim();const msg=$('#bookMsg');
@@ -8169,7 +8279,7 @@ function renderImpDemo(){
     l.charAt(0)==='#'?`<span class="cm">${escHtml(l)}</span>`:escHtml(l)
   ).join('\n');
 }
-$('#btnTpl').onclick=()=>{
+$s('#btnTpl').onclick=()=>{
   const csv='\ufeff'+'# ============ 老师题库模板（外研版八上）============\n'
    +'# 用法：用 Excel / WPS 打开本文件，把示例改成你自己的题，【另存为 CSV】发给同学。\n'
    +'# 每行一题，字段用英文逗号 , 隔开；选项用竖线 | 隔开；# 开头是注释，不会导入。\n'
@@ -8190,9 +8300,9 @@ $('#btnTpl').onclick=()=>{
   dl(new Blob([csv],{type:'text/csv;charset=utf-8'}),'老师题库模板.csv');
   toast('模板已下载，用 Excel/WPS 打开填写');
 };
-$('#btnFillDemo').onclick=()=>{const t=$('#impTxt');t.value=BANK_DEMO;t.focus();toast('示例已填入，可直接改完再导入')};
-$('#btnImpPaste').onclick=()=>{const v=$('#impTxt').value;if(!v.trim()){toast('先把题目粘贴进来 🙂');return}doImport(v)};
-$('#btnImpFile').onclick=()=>{
+$s('#btnFillDemo').onclick=()=>{const t=$('#impTxt');t.value=BANK_DEMO;t.focus();toast('示例已填入，可直接改完再导入')};
+$s('#btnImpPaste').onclick=()=>{const v=$('#impTxt').value;if(!v.trim()){toast('先把题目粘贴进来 🙂');return}doImport(v)};
+$s('#btnImpFile').onclick=()=>{
   const f=$('#impFile').files[0];
   if(!f){toast('请先选择文件');return}
   const fr=new FileReader();
@@ -8250,7 +8360,7 @@ function renderBankQ(){
         fb.textContent='❌ 不对哦，再想想';fb.className='feedback no';sNO();
       }
     };
-    $('#typeGo').onclick=check;inp.onkeydown=e=>{if(e.key==='Enter')check()};
+    $s('#typeGo').onclick=check;inp.onkeydown=e=>{if(e.key==='Enter')check()};
     startTimer(30,()=>{fb.textContent=`⏰ 超时！答案是 ${q.ans}`;fb.className='feedback no';inp.value=q.ans;inp.readOnly=true;sNO();setTimeout(nextQ,1400)});
   }else{
     /* 干扰项优先取同题库的其他词汇；题库太小则从内置 335 词补足，避免出现只有一个选项的“送分题” */
@@ -8262,7 +8372,7 @@ function renderBankQ(){
       <div class="qWord"><div class="big">${q.w}</div><div class="ph">${q.ph||'&nbsp;'}</div>
       <div style="margin-top:10px"><button class="spk" id="qSpk">🔊</button></div></div>
       <div class="opts" id="optWrap"></div>`;
-    $('#qSpk').onclick=()=>{sTap();say(q.w)};say(q.w);
+    $s('#qSpk').onclick=()=>{sTap();say(q.w)};say(q.w);
     let done=false;const wrap=$('#optWrap');
     opts.forEach(cn=>{const b=document.createElement('button');b.className='opt';b.textContent=cn;if(cn===q.cn)b.dataset.ok='1';
       b.onclick=()=>{if(done)return;done=true;stopTimer();
@@ -8554,7 +8664,7 @@ async function renderFriendPageInner(seq){
   /* 停留期间轮询：有新礼物自动出现（别人送完不用等我刷新） */
   pmGiftPollStart(w);
   const lk=cloudLink();
-  if(!lk){ w.innerHTML='<div style="text-align:center;padding:24px 10px"><div style="font-size:40px">👥</div><div style="font-size:14px;color:#55617c;margin:10px 0;line-height:1.8">加好友、发消息、打挑战赛<br>需要先登录云端账号</div><button class="bigBtn" id="frGoLogin" style="max-width:220px;margin:0 auto;display:block">去登录 / 注册</button></div>'; $('#frGoLogin').onclick=()=>{renderLogin();go('scr-login')}; return; }
+  if(!lk){ w.innerHTML='<div style="text-align:center;padding:24px 10px"><div style="font-size:40px">👥</div><div style="font-size:14px;color:#55617c;margin:10px 0;line-height:1.8">加好友、发消息、打挑战赛<br>需要先登录云端账号</div><button class="bigBtn" id="frGoLogin" style="max-width:220px;margin:0 auto;display:block">去登录 / 注册</button></div>'; $s('#frGoLogin').onclick=()=>{renderLogin();go('scr-login')}; return; }
   /* [2026-10-06 提速] 原来这里还有一次 pmGiftPollUnread()（不 await 的整表读），
      但紧接着的 wc_friend_page 合并接口已经把 unread 回填了（见下 d.unread → pmUnreadMerge）——
      等于同一时刻向云端要了两次整张表。删掉；只有合并接口失败走老路径时才补读。 */
@@ -8744,7 +8854,7 @@ function renderFrBoardInline(w,pm){
 async function frRenderChat(){
   const w=$('#frWrap'); const pm=await fetchPlayers(); const p=pm[_chatWith]||{};
   const r=await soci('msg_list',{aid:_chatWith});
-  if(!r.ok||!r.data||!r.data.ok){ w.innerHTML='<div style="text-align:center;padding:24px;color:#8a95ad">'+((r.data&&r.data.msg)||r.msg||'加载失败')+'<div><button class="bigBtn ghost" id="chatBack2" style="margin-top:12px">返回</button></div></div>'; $('#chatBack2').onclick=()=>{_chatWith=null;renderFriendPage().catch(function(){})}; return; }
+  if(!r.ok||!r.data||!r.data.ok){ w.innerHTML='<div style="text-align:center;padding:24px;color:#8a95ad">'+((r.data&&r.data.msg)||r.msg||'加载失败')+'<div><button class="bigBtn ghost" id="chatBack2" style="margin-top:12px">返回</button></div></div>'; $s('#chatBack2').onclick=()=>{_chatWith=null;renderFriendPage().catch(function(){})}; return; }
   const d=r.data.data, msgs=d.msgs||[];
   try{ _pmMsgSig=msgs.map(m=>(m.a||'')+'|'+(m.ts||'')+'|'+(m.body||'')).join('~'); }catch(e){}
   const left=d.text_max-d.text_used;
@@ -8774,9 +8884,9 @@ async function frRenderChat(){
      这里立刻刷新一次底部红点 + 好友行徽标，让「好友」tab 和列表里那位的红点马上清零。 */
   try{ pmGiftPollUnread(); }catch(e){}
   try{ frPatchBadges(); }catch(e){}
-  $('#chatBack').onclick=()=>{_chatWith=null;renderFriendPage().catch(function(){});};
-  $('#chatSend').onclick=async()=>{ await frSend('t') };
-  $('#chatDel').onclick=async()=>{ if(!confirm('确定解除与该同学的好友关系？'))return; const rr=await soci('unfriend',{aid:_chatWith}); toast((rr.data&&rr.data.msg)||''); _chatWith=null; await loadFriends(); renderFriendPage().catch(function(){}); };
+  $s('#chatBack').onclick=()=>{_chatWith=null;renderFriendPage().catch(function(){});};
+  $s('#chatSend').onclick=async()=>{ await frSend('t') };
+  $s('#chatDel').onclick=async()=>{ if(!confirm('确定解除与该同学的好友关系？'))return; const rr=await soci('unfriend',{aid:_chatWith}); toast((rr.data&&rr.data.msg)||''); _chatWith=null; await loadFriends(); renderFriendPage().catch(function(){}); };
   Array.prototype.forEach.call(w.querySelectorAll('[data-quick]'),b=>{ b.onclick=async()=>{ const rr=await soci('msg_send',{aid:_chatWith,body:b.dataset.quick,kind:'q'}); toast((rr.data&&rr.data.msg)||rr.msg||''); await frRenderChat(); } });
 }
 async function frSend(kind){
@@ -8845,7 +8955,7 @@ async function frPlayDuel(id){
       +'<div style="font-size:13px;color:#8a95ad;margin-top:6px">用时 '+sec+' 秒 · 获得 '+Math.round(gain)+' 经验</div>'
       +'<div style="font-size:12px;color:#4f6ef7;margin-top:8px">'+((r.data&&r.data.msg)||'已提交')+'</div>'
       +'<button class="bigBtn" id="duelBack" style="margin-top:14px">返回好友页</button></div>';
-    $('#duelBack').onclick=()=>{renderFriendPage().catch(function(){});};
+    $s('#duelBack').onclick=()=>{renderFriendPage().catch(function(){});};
   };
   step();
 }
@@ -9108,7 +9218,11 @@ function pmFeedGain(lv, sat){
   return Math.max(1, Math.round(span * ratio));
 }
 /* ================= 陪伴时长账本（跨天累计 · 云同步） ================= */
-const TM_GOAL=7200;                       /* 产出目标：2 小时有效陪伴 */
+var TM_GOAL=7200;                         /* 产出目标：2 小时有效陪伴
+   [2026-10-06 修·TDZ 崩溃] 原来写的是 const。启动区的 tmBoot() 在它之前执行，
+   tmBoot -> setInterval(tmTick) -> tmProduceCheck 读 TM_GOAL 时它还没初始化，
+   const 的暂时性死区直接抛 ReferenceError，把整条启动链打断（页面表现：导航栏不出现）。
+   改 var：有函数级提升，声明之前访问只是 undefined，不会抛错打断启动。 */
 function tmDefault(){ return {v:1,st:Date.now(),d:today(),on:0,pz:0,lg:0,ex:0,cr:0,tt:0,rv:0,wis:0,cnf:0,cnfGuard:false,lp:0,sp:0,pt:0}; }
 function tmGet(){
   if(!tm||typeof tm!=='object') tm=tmDefault();
