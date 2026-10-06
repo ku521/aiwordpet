@@ -6140,7 +6140,24 @@ $s('#tabbar').onclick=e=>{
   const b=e.target.closest('.tb');if(!b)return;sTap();
   const t=b.dataset.tab;
   if(t==='home'){renderHome();try{newsUnreadRefresh()}catch(e){};go('scr-home')}
-  else if(t==='friend'){ _chatWith=null; renderFriendPage().catch(function(){}); go('scr-friend'); }
+  /* [2026-10-06 修] 原来是空 catch —— 渲染失败被完全静默，
+     表现就是「页面切过去了、内容空白、控制台无报错」，极难排查。
+     现在至少 toast 出原因，并在容器还是空时写一句可见提示。 */
+  else if(t==='friend'){
+    _chatWith=null;
+    renderFriendPage().catch(function(e){
+      console.warn('[好友页] 渲染失败', e);
+      const msg=String((e&&e.message)||e||'未知原因').slice(0,80);
+      try{ toast('好友页加载失败：'+msg.slice(0,40)); }catch(_e){}
+      try{ const ww=document.getElementById('frWrap');
+           if(ww&&!(ww.textContent||'').trim())
+             ww.innerHTML='<div style="text-align:center;padding:24px;color:#c0392b;'
+               +'font-size:13px;line-height:1.7">😢 好友页加载失败<br>'
+               +'<span style="font-size:11px;color:#8a95ad">'+msg+'</span></div>';
+      }catch(_e2){}
+    });
+    go('scr-friend');
+  }
   else if(t==='pet'){renderPetPage();go('scr-pet')}
   else if(t==='wrong'){renderWrong();go('scr-wrong')}
   else{renderMe();go('scr-me')}
@@ -8779,7 +8796,17 @@ async function loadFriends(){
     _friendLoaded=true;
   }
 }
-let frReq=[], _chatWith=null, _bowlIv=null;
+let frReq=[], _chatWith=null, _bowlIv=null, _frDuels=[];
+/* [2026-10-06 修·致命] _frSeq 之前**从没声明过**，却被用了 12 处。
+   `const seq=++_frSeq` 在 renderFriendPage() 的 try **之外**，
+   读未声明变量会抛 ReferenceError → Promise 直接 reject →
+   被调用方 `.catch(function(){})` **静默吞掉**。
+   表现完全吻合用户截图：点好友 tab 时 go() 已执行（页面切过去了、
+   页头和底部导航都在），但 #frWrap 一个字都没写、控制台零报错。
+   seq 是「渲染序号」，用来让过期的异步渲染主动退出（seq!==_frSeq 就 return）。
+   教训：这类 bug 静态检查（node --check）与任何云层测试都抓不到，
+   只有「在 vm 里真点一次 tab，看 DOM 有没有被写」才能暴露。 */
+let _frSeq = 0;
 /* [2026-10-06 调整 8→20 秒] 好友页整页加载预算（毫秒）。
    为什么不是 8 秒：实测 Turso 单次读在这台机器上
    最快 863ms / 中位 934ms / 最慢 3564ms，而真实用户网络更慢；
@@ -8850,12 +8877,18 @@ function frWatchStart(w){
 }
 async function renderFriendPage(){
   const w=$('#frWrap'); if(!w)return;
-  const seq=++_frSeq;
-  frWatchStart(w);
+  /* [2026-10-06 修] 原来 `const seq=++_frSeq` 在 try **外面**：
+     这里一抛错（最典型就是变量未声明 → ReferenceError），
+     Promise 直接 reject，被 tabbar 里那个空 catch 吃掉，
+     结果是「页面切过去了、内容空白、控制台无报错」，极难排查。
+     现在把序号自增也放进 try：任何异常都会走下面的重试框，用户看得见。 */
+  let seq=0;
   try{
+    seq=++_frSeq;
+    frWatchStart(w);
     await renderFriendPageInner(seq);
   }catch(e){
-    if(seq!==_frSeq)return;
+    if(seq&&seq!==_frSeq)return;
     const w3=$('#frWrap');
     frRetryBox(w3,'页面内容没加载出来',String(((e&&e.message)||e||'')).slice(0,120));
   }
