@@ -5401,7 +5401,11 @@ async function admFeedback(){
     b.disabled=true;b.textContent='保存中…';
     /* 2026-10-05：这里以前写的是 id:+id —— f.id 是「f+时间戳」这种字符串，+id 会变成 NaN，
        后端按 NaN 下标存，回复存下去了但同学永远看不到。改成原样传 id + 带上 aid。 */
-    const rr=await rpc('wc_admin2',{p_admin:ADM.pw,p_action:'fb_reply',p_val:{id:id,aid:f.aid,reply:v}});
+    /* 2026-10-06 修：f 是上面 list.map(f=>...) 的参数，作用域只在 map 里，
+       这里读 f.aid 等于读未声明变量 → 点「保存回复」必抛 ReferenceError，
+       管理员的回复功能一直是坏的。改成按 id 从 list 里把这条反馈找回来。 */
+    const f=list.find(function(x){ return String(x&&x.id)===String(id); });
+    const rr=await rpc('wc_admin2',{p_admin:ADM.pw,p_action:'fb_reply',p_val:{id:id,aid:(f&&f.aid)||'',reply:v}});
     const ok=rr.ok&&rr.data&&rr.data.ok;
     toast((rr.data&&rr.data.msg)||rr.msg||(ok?'已保存':'保存失败'));
     if(ok){b.textContent='✓ 已回复';b.style.background='#10b981';ta.disabled=true;}
@@ -8806,7 +8810,7 @@ let frReq=[], _chatWith=null, _bowlIv=null, _frDuels=[];
    seq 是「渲染序号」，用来让过期的异步渲染主动退出（seq!==_frSeq 就 return）。
    教训：这类 bug 静态检查（node --check）与任何云层测试都抓不到，
    只有「在 vm 里真点一次 tab，看 DOM 有没有被写」才能暴露。 */
-let _frSeq = 0;
+let _frSeq = 0, _frWatch = null, _t0 = 0;
 /* [2026-10-06 调整 8→20 秒] 好友页整页加载预算（毫秒）。
    为什么不是 8 秒：实测 Turso 单次读在这台机器上
    最快 863ms / 中位 934ms / 最慢 3564ms，而真实用户网络更慢；
