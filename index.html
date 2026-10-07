@@ -3964,7 +3964,7 @@ function isFriend(id){ return !!(friendIds&&friendIds.indexOf(id)>=0); }
 let friendIds=[], _friendLoaded=false;
 
 async function cloudPush(force){
-  const lk=cloudLink(); if(!lk)return;
+  const lk=cloudLink(); if(!lk){ try{ if(typeof cloudBadgeSet==='function')cloudBadgeSet('bad'); }catch(e){} return {ok:false, skipped:'no-link'}; }
   /* v16：本次登录还没成功拉过云端之前，禁止把本机值推上去
      （loadAll 会重置 items，过早推送会用本机初始值覆盖账号真实数据）
      只有「切换/登录另一个账号」这种必须立刻落盘的场合才传 force=true 跳过这道闸。 */
@@ -3981,7 +3981,8 @@ async function cloudPush(force){
   const body=Object.assign({p_aid:lk.aid, p_pw:lk.pw}, cloudPayload());
   if(_skipPet) body.p_pet=null;
   const r=await rpc('wc_save', body);
-  if(!r.ok) console.warn('云端保存失败:', (r.data&&r.data.msg)||r.msg);
+  if(!r.ok){ console.warn('云端保存失败:', (r.data&&r.data.msg)||r.msg); try{ if(typeof cloudBadgeSet==='function')cloudBadgeSet('bad'); }catch(e){} }
+  else { try{ if(typeof cloudBadgeSet==='function')cloudBadgeSet('ok'); }catch(e){} }
   return r;
 }
 let _pushT=null;
@@ -3999,10 +4000,10 @@ async function cloudPull(){
 }
 let _pulledOnce=false;
 function cloudPullCurrent(){
-  if(!cloudLink()) return;
+  if(!cloudLink()){ try{ if(typeof cloudBadgeSet==='function')cloudBadgeSet('bad'); }catch(e){} return; }
   if(!cloud()){ setTimeout(cloudPullCurrent, 1500); return; }
   if(_pulledOnce) return;
-  cloudPull().then(res=>{ if(res&&res.ok){ try{ if(typeof pmAutoArm==='function')pmAutoArm(); if($('#scr-home').classList.contains('active'))renderHome(); if($('#scr-me').classList.contains('active'))renderMe(); }catch(e){} } try{ pmGiftPollUnread(); }catch(e){} });
+  cloudPull().then(res=>{ if(res&&res.ok){ try{ if(typeof cloudBadgeSet==='function')cloudBadgeSet('ok'); }catch(e){} try{ if(typeof pmAutoArm==='function')pmAutoArm(); if($('#scr-home').classList.contains('active'))renderHome(); if($('#scr-me').classList.contains('active'))renderMe(); }catch(e){} } else { try{ if(typeof cloudBadgeSet==='function')cloudBadgeSet('bad'); }catch(e){} } try{ pmGiftPollUnread(); }catch(e){} });
 }
 function cloudLogout(){
   const u=curUser(); if(u){ delete u.cloud; u.name='同学'; u.av='🐣'; }
@@ -4031,6 +4032,59 @@ function cloudRecentAdd(aid,pw,name,av){
   const l=cloudRecentGet().filter(x=>x&&x.aid!==aid);
   l.unshift({aid:String(aid||'').trim().toUpperCase(),pw:pw||'',name:name||'',av:av||'',t:Date.now()});
   raw.set('cloudRecent',l.slice(0,6));
+}
+/* ================= 云存档状态角标（2026-10-07 新增）=================
+   解决「宠物没同步云端却毫无提示」：常驻小角标显示同步状态；
+   未登录云端账号时变红，点开提示用 workbuddy 链接打开可跨设备同步。
+   CSS 动态注入，不碰主页内样式块，避免影响发布门禁。 */
+function cloudBadgeInit(){
+  if(document.getElementById('cloudBadge'))return;
+  try{
+    const st=document.createElement('style');
+    st.textContent='.cloudBadge{position:fixed;right:10px;top:10px;z-index:8800;display:flex;align-items:center;gap:6px;'
+      +'padding:5px 10px;border-radius:20px;font:12px/1 -apple-system,"Microsoft YaHei",sans-serif;color:#fff;'
+      +'background:#8a95ad;box-shadow:0 2px 8px rgba(20,30,50,.18);cursor:pointer;user-select:none;max-width:46vw}'
+      +'.cloudBadge .dot{width:8px;height:8px;border-radius:50%;background:#fff;flex:none}'
+      +'.cloudBadge.ok{background:#2bb673}.cloudBadge.bad{background:#e3544a}.cloudBadge.sync{background:#f0a020}.cloudBadge.wait{background:#8a95ad}';
+    document.head.appendChild(st);
+  }catch(e){}
+  const b=document.createElement('div');
+  b.id='cloudBadge'; b.className='cloudBadge wait';
+  b.innerHTML='<span class="dot"></span><span class="txt">云存档</span>';
+  b.onclick=function(){ cloudBadgeDetail(); };
+  document.body.appendChild(b);
+}
+function cloudBadgeSet(state){
+  const b=document.getElementById('cloudBadge'); if(!b)return;
+  b.className='cloudBadge '+state; b.dataset.st=state;
+  const txt=b.querySelector('.txt'); if(!txt)return;
+  if(state==='ok') txt.textContent='已同步云端';
+  else if(state==='bad') txt.textContent=(cloudLink()?'云端保存失败':'未同步云端');
+  else if(state==='sync') txt.textContent='同步中…';
+  else txt.textContent='云存档';
+}
+function cloudBadgeRefresh(){
+  if(!cloudLink()){ cloudBadgeSet('bad'); return; }
+  cloudBadgeSet('wait');
+}
+function cloudBadgeDetail(){
+  const lk=cloudLink();
+  let msg;
+  if(!lk){
+    msg='⚠️ 宠物进度未同步云端：当前打开方式/设备没登录云端账号，进度只存在本机。用 workbuddy 链接打开本页并登录同一云端账号，宠物就能跨设备同步。';
+  }else{
+    const st=(document.getElementById('cloudBadge')||{}).dataset||{};
+    msg='☁️ 云存档：'+(st.st==='ok'?'已同步云端':st.st==='bad'?'上次保存失败':'同步中')+' · 账号 '+lk.aid+' · 来源 '+(location.origin||location.protocol);
+  }
+  if(typeof toast==='function') toast(msg); else alert(msg);
+}
+/* 关键宠物动作：已拉过云端→立即强推（cloudPush(true)），没拉过→走防抖（首次拉取后自动补传） */
+function petCloudPushNow(){
+  try{
+    if(typeof cloudPush!=='function')return;
+    if(typeof _pulledOnce!=='undefined' && _pulledOnce) cloudPush(true);
+    else if(typeof cloudPushDebounced==='function') cloudPushDebounced();
+  }catch(e){}
 }
 /* ================= 云端账号 ↔ 本机档案「一一绑定」=================
    以前的坑：登录/切换另一个云端账号时只做了 setCloudLink()+applyCloudData()，
@@ -5977,6 +6031,7 @@ _bootStep('确保有档案', function(){ ensureUser(); });
 _bootStep('载入档案', function(){ loadAll(raw.get('cur',USERS[0]?USERS[0].id:null)); });
 _bootStep('陪伴时长', function(){ tmBoot(); });
 _bootStep('云端拉取', function(){ cloudPullCurrent(); });
+_bootStep('云存档状态角标', function(){ cloudBadgeInit(); cloudBadgeRefresh(); });
 _bootStep('首次登录引导', function(){ setTimeout(function(){
   try{ maybeFirstRunCloud(); }catch(e){ console.warn('[启动] 首次登录引导出错：', e); }
 }, 900); });
@@ -9536,7 +9591,7 @@ function petSwap(k){
     ['lv','grow','food','mood','moodT','sat','clean','satT0','cleanT0','last','fedCnt','fedDay','foodDay','foodGet','signDay','signStreak','signTotal','pp','prodT','prodN','tapDay','tapCnt','accT','prodDay','prodCnt','plusCnt','plusDay'].forEach(function(f){ if(cur[f]!==undefined)L[f]=cur[f] });
     petObj.pets[k]=Object.assign(petDefault(), {k:k}, L);
   }
-  petObj.k=k; saveAll();cloudPushDebounced();
+  petObj.k=k; saveAll(); petCloudPushNow();
   const nm=(PETS.find(function(p){return p.k===k})||{}).n||k;
   try{ toast('已切到 '+nm+'，它跑到地图里啪'); }catch(e){}
   try{ if(typeof renderPetPage==='function')renderPetPage(); }catch(e){ try{toast('切换完成，但页面刷新失败：'+e.message)}catch(e2){} }
@@ -10681,6 +10736,7 @@ function petLevelUp(p){
        现在只改 .pmLive 的宽高，不整页重绘。 */
     try{ pmRefreshPetSize(p.k); }catch(e){}
   }
+  try{ petCloudPushNow(); }catch(e){}   /* [2026-10-07] 升级立即落盘，避免防抖在切设备前丢失 */
   return up;
 }
 function petSync(){
@@ -11815,7 +11871,7 @@ function petSwitchPanel(){
   /* [v25] 同上：点亮切换面板里的宠物形象 */
   try{ Array.prototype.forEach.call(document.querySelectorAll('.pmDexItem'),function(d){ pmPetPose(d,'idle'); }); }catch(e){}
   Array.prototype.forEach.call(document.querySelectorAll('[data-psw]'),function(b){b.onclick=function(){petSwap(b.dataset.psw);cClose();try{renderPetPage()}catch(e){}}});
-  Array.prototype.forEach.call(document.querySelectorAll('[data-pad]'),function(b){b.onclick=function(){const q=petEnsure();q.k=b.dataset.pad;petLevelUp(q);saveAll();cloudPushDebounced();cClose();toast('领养成功，它已经跑到地图里啦');renderPetPage()}});
+  Array.prototype.forEach.call(document.querySelectorAll('[data-pad]'),function(b){b.onclick=function(){const q=petEnsure();q.k=b.dataset.pad;petLevelUp(q);saveAll();petCloudPushNow();cClose();toast('领养成功，它已经跑到地图里啦');renderPetPage()}});
 }
 /* [v3.11] 原来铺在地图下面的长段说明，全部搬进这里，由帮助弹窗折叠着展示 */
 function pmIntroHTML(){
