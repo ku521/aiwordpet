@@ -8331,12 +8331,15 @@ function drawCard(cb){
   });
   return c;
 }
-/* [2026-10-07 v43] 保存图片按环境自动分流（实测：预览面板 iframe 沙箱没给 allow-downloads，
-   <a download> 一律被拦、showSaveFilePicker 直接 SecurityError —— 这两条只在顶层页面可用）：
-   ① 顶层页面（浏览器直接打开发布链接）→ a[download] 直接下载，一定能存；
-   ② iframe（预览/内嵌窗口）→ navigator.share 系统分享（手机分享面板可「存储图像/保存到相册」）；
-   ③ 分享不可用 → window.open 新标签页看大图（右键另存）；
-   ④ 全走不通 → 返回 none，弹窗里有「复制链接」按钮：把网页链接粘到浏览器打开后再点保存即可。 */
+/* [2026-10-07 v43/v44] 保存图片按环境自动分流：
+   根因 = workbuddy.link 把页面包进 sandbox iframe 且没 allow-downloads，页面内一切下载被浏览器拦截
+   （控制台 Download is disallowed）。而 GitHub Pages(https://ku521.github.io/aiwordpet/) 是顶层页面，
+   <a download> 可用，所以那里能存。两个地址是同一份代码、同一云账号数据。
+   ① 顶层页面（GitHub Pages / 浏览器直接打开）→ a[download] 直接下载，一定成功；
+   ② 沙箱（workbuddy 预览 iframe）→ 脚本下载全被拦（实测 <a download> 拦、showSaveFilePicker SecurityError、
+     navigator.share / window.open 在 iframe 权限策略下也不可用）。唯一稳的路：复制「顶层镜像地址」到浏览器打开再存。
+   所以：沙箱里「复制链接」一律复制 PM_TOP_URL（顶层，可保存），并顺手尝试 window.open 新标签。 */
+const PM_TOP_URL = 'https://ku521.github.io/aiwordpet/';
 function pmInTop(){ try{ return window.self===window.top; }catch(e){ return false; } }
 async function pmSavePic(url, name){
   const anchor=function(){
@@ -8363,17 +8366,21 @@ async function pmSavePic(url, name){
   }catch(e){}
   return 'none';
 }
-/* 复制网页链接（execCommand 兜底，沙箱里 navigator.clipboard 常被权限政策挡） */
+/* 复制「可在浏览器正常保存」的链接。
+   关键点：在沙箱（workbuddy 预览 iframe）里 location.href 本身也是沙箱地址，复制它再打开还是被禁下载；
+   所以一律复制顶层镜像 PM_TOP_URL（GitHub Pages，顶层页面，<a download> 可用）。顶层打开时则复制当前页地址。 */
 function pmCopyLink(){
+  const target = pmInTop() ? location.href : PM_TOP_URL;
   let ok=false;
   try{
-    const t=document.createElement('textarea'); t.value=location.href;
+    const t=document.createElement('textarea'); t.value=target;
     t.style.cssText='position:fixed;left:-999px;top:0;opacity:0';
     document.body.appendChild(t); t.select();
     ok=document.execCommand('copy'); t.remove();
   }catch(e){ ok=false; }
-  if(!ok){ try{ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(location.href); ok=true; } }catch(e){} }
-  toast(ok?'链接已复制 ✅ 用浏览器打开本页后，点「保存图片」就能直接下载':'复制没成功 · 请手动记下网址后在浏览器打开');
+  if(!ok){ try{ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(target); ok=true; } }catch(e){} }
+  if(ok){ try{ const w=window.open(target,'_blank'); if(w){} }catch(e){} }
+  toast(ok ? ('已复制可保存的链接 ✅ 用浏览器打开它（已尝试新标签）后点「保存图片」即可正常下载') : ('复制失败 · 请手动打开：'+target));
 }
 let lastCard=null;
 $s('#btnSaveImg').onclick=()=>{
@@ -8389,7 +8396,7 @@ $s('#btnSaveImg').onclick=()=>{
       const mask=document.createElement('div'); mask.className='pmShotMask';
       mask.innerHTML='<div class="pmShotCard"><img src="'+url+'" alt="战绩勋章卡">'
         +'<div class="pmShotBar"><button class="main" id="miDl">💾 保存到相册</button><button id="miCopy">🔗 复制链接</button><button id="miClose">关闭</button></div>'
-        +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">预览窗口里若存不了：<b>电脑</b>右键图片→图片另存为 · <b>手机</b>长按图片→保存图片，或复制链接用浏览器打开后再保存</div></div>';
+        +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">此窗口（workbuddy 预览）浏览器禁止下载。<b>点「复制链接」</b>→ 用浏览器打开该地址 → 即可正常保存图片</div></div>';
       document.body.appendChild(mask);
       mask.onclick=function(e){ if(e.target===mask||e.target.id==='miClose') mask.remove(); };
       const miDl=mask.querySelector('#miDl');
@@ -10547,7 +10554,7 @@ function pmSnapshot(){
         const mask=document.createElement('div'); mask.className='pmShotMask';
         mask.innerHTML='<div class="pmShotCard"><img src="'+url+'" alt="我的小院子留念"><div class="pmShotBar"'
           +'><button class="main" id="pmShotDl">💾 保存照片</button><button id="pmShotCopy">🔗 复制链接</button><button id="pmShotClose">关闭</button></div>'
-          +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">预览窗口里若存不了：<b>电脑</b>右键图片→图片另存为 · <b>手机</b>长按图片→保存图片，或复制链接用浏览器打开后再保存</div></div>';
+          +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">此窗口（workbuddy 预览）浏览器禁止下载。<b>点「复制链接」</b>→ 用浏览器打开该地址 → 即可正常保存照片</div></div>';
         document.body.appendChild(mask);
         mask.onclick=function(e){
           if(e.target===mask||e.target.id==='pmShotClose') mask.remove();
