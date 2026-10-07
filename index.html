@@ -8380,7 +8380,8 @@ function pmCopyLink(){
   }catch(e){ ok=false; }
   if(!ok){ try{ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(target); ok=true; } }catch(e){} }
   if(ok){ try{ const w=window.open(target,'_blank'); if(w){} }catch(e){} }
-  toast(ok ? ('已复制可保存的链接 ✅ 用浏览器打开它（已尝试新标签）后点「保存图片」即可正常下载') : ('复制失败 · 请手动打开：'+target));
+  toast(ok ? ('已复制可保存的链接 ✅ 打开手机浏览器（Safari/Chrome）→ 地址栏粘贴打开 → 点「保存图片」就会真正下载到相册')
+           : ('复制失败 · 请手动在浏览器打开：'+target));
 }
 let lastCard=null;
 $s('#btnSaveImg').onclick=()=>{
@@ -8394,19 +8395,24 @@ $s('#btnSaveImg').onclick=()=>{
     if(!url){ toast('已尝试保存 · 若没反应，请长按页面上的卡片图保存'); return; }
     try{
       const mask=document.createElement('div'); mask.className='pmShotMask';
-      mask.innerHTML='<div class="pmShotCard"><img src="'+url+'" alt="战绩勋章卡">'
-        +'<div class="pmShotBar"><button class="main" id="miDl">💾 保存到相册</button><button id="miCopy">🔗 复制链接</button><button id="miClose">关闭</button></div>'
-        +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">此窗口（workbuddy 预览）浏览器禁止下载。<b>点「复制链接」</b>→ 用浏览器打开该地址 → 即可正常保存图片</div></div>';
+      const inSb=!pmInTop();  /* 沙箱（workbuddy 预览）里一切下载都被平台拦截，主按钮换成「用浏览器打开保存」 */
+      mask.innerHTML='<div class="pmShotCard">'
+        +(inSb?'<div style="margin:0 0 8px;padding:9px 11px;background:#fff7e0;border:1px solid #f0d488;border-radius:10px;font-size:12.5px;color:#7a5b00;line-height:1.55;text-align:left"><b>📱 手机最稳的存法：</b>点蓝色按钮 → 复制链接 → 用手机浏览器（Safari/Chrome）打开 → 再点「保存图片」，就会真正下载到相册。也可先试试长按下方图片。</div>':'')
+        +'<img src="'+url+'" alt="战绩勋章卡" style="user-select:auto;-webkit-user-select:auto;-webkit-touch-callout:default">'
+        +'<div class="pmShotBar"><button class="main" id="miDl">'+(inSb?'📲 用浏览器打开并保存':'💾 保存到相册')+'</button><button id="miCopy">🔗 复制链接</button><button id="miClose">关闭</button></div>'
+        +(inSb?'':'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">若没自动保存：<b>电脑</b>右键图片→图片另存为 · <b>手机</b>长按图片→保存图片</div>')
+        +'</div>';
       document.body.appendChild(mask);
       mask.onclick=function(e){ if(e.target===mask||e.target.id==='miClose') mask.remove(); };
       const miDl=mask.querySelector('#miDl');
       if(miDl) miDl.onclick=async function(){
+        if(inSb){ pmCopyLink(); return; }   /* 沙箱里主按钮 = 复制顶层镜像链接 + 尝试新标签 */
         const ch=await pmSavePic(url, nm);
         toast(ch==='dl'?'已开始下载 ✅'
           :ch==='share'?'已调出系统分享 · 选「存储图像/保存到相册」'
           :ch==='share-cancel'?'已取消分享'
-          :ch==='pop'?'已在新标签页打开大图 · 右键图片可另存'
-          :'这个窗口禁止保存 · 请右键/长按图片，或复制链接用浏览器打开');
+          :ch==='pop'?'已在新标签页打开大图 · 长按/右键图片可保存'
+          :'这个窗口禁止保存 · 请复制链接用浏览器打开后保存');
       };
       const miCopy=mask.querySelector('#miCopy');
       if(miCopy) miCopy.onclick=function(){ pmCopyLink(); };
@@ -10552,22 +10558,27 @@ function pmSnapshot(){
         const url=cv.toDataURL('image/png');
         /* 弹预览 */
         const mask=document.createElement('div'); mask.className='pmShotMask';
-        mask.innerHTML='<div class="pmShotCard"><img src="'+url+'" alt="我的小院子留念"><div class="pmShotBar"'
-          +'><button class="main" id="pmShotDl">💾 保存照片</button><button id="pmShotCopy">🔗 复制链接</button><button id="pmShotClose">关闭</button></div>'
-          +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">此窗口（workbuddy 预览）浏览器禁止下载。<b>点「复制链接」</b>→ 用浏览器打开该地址 → 即可正常保存照片</div></div>';
+        const inSb=!pmInTop();
+        mask.innerHTML='<div class="pmShotCard">'
+          +(inSb?'<div style="margin:0 0 8px;padding:9px 11px;background:#fff7e0;border:1px solid #f0d488;border-radius:10px;font-size:12.5px;color:#7a5b00;line-height:1.55;text-align:left"><b>📱 手机最稳的存法：</b>点蓝色按钮 → 复制链接 → 用手机浏览器（Safari/Chrome）打开 → 再点「保存照片」，就会真正下载到相册。也可先试试长按下方图片。</div>':'')
+          +'<img src="'+url+'" alt="我的小院子留念" style="user-select:auto;-webkit-user-select:auto;-webkit-touch-callout:default">'
+          +'<div class="pmShotBar"><button class="main" id="pmShotDl">'+(inSb?'📲 用浏览器打开并保存':'💾 保存照片')+'</button><button id="pmShotCopy">🔗 复制链接</button><button id="pmShotClose">关闭</button></div>'
+          +(inSb?'':'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">若没自动保存：<b>电脑</b>右键图片→图片另存为 · <b>手机</b>长按图片→保存图片</div>')
+          +'</div>';
         document.body.appendChild(mask);
         mask.onclick=function(e){
           if(e.target===mask||e.target.id==='pmShotClose') mask.remove();
         };
         const dl=mask.querySelector('#pmShotDl');
         if(dl) dl.onclick=async function(){
+          if(inSb){ pmCopyLink(); return; }
           const nm2='AI单词闯关-'+((P.n)||'我的宠物')+'-Lv'+(p.lv||1)+'.png';
           const ch=await pmSavePic(url, nm2);
           toast(ch==='dl'?'📷 已开始下载 ✅'
             :ch==='share'?'📷 已调出系统分享 · 选「存储图像/保存到相册」'
             :ch==='share-cancel'?'📷 已取消分享'
-            :ch==='pop'?'📷 已在新标签页打开大图 · 右键图片可另存'
-            :'📷 这个窗口禁止保存 · 请右键/长按图片，或复制链接用浏览器打开');
+            :ch==='pop'?'📷 已在新标签页打开大图 · 长按/右键图片可保存'
+            :'📷 这个窗口禁止保存 · 请复制链接用浏览器打开后保存');
         };
         const dlCopy=mask.querySelector('#pmShotCopy');
         if(dlCopy) dlCopy.onclick=function(){ pmCopyLink(); };
