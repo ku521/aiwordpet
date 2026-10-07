@@ -8331,6 +8331,41 @@ function drawCard(cb){
   });
   return c;
 }
+/* [2026-10-07 v42] 预览沙箱禁 <a download>（宿主 iframe 没给 allow-downloads，我们改不了），
+   改成三通道保存：① Web Share 系统分享（手机分享面板里能「存储图像/保存到相册」）
+   ② showSaveFilePicker 真「另存为」对话框（电脑 Chrome/Edge）③ a[download] 兜底（正常浏览器直接下载）。
+   就算三条都走不通，弹窗里的引导（电脑右键图片→图片另存为 / 手机长按图片→保存图片）用的是浏览器自带菜单，沙箱拦不了。 */
+function pmSavePic(url, name){
+  let file=null;
+  try{
+    const ci=url.indexOf(','), bstr=atob(url.slice(ci+1));
+    const u8=new Uint8Array(bstr.length);
+    for(let i=0;i<bstr.length;i++)u8[i]=bstr.charCodeAt(i);
+    file=new File([u8], name, {type:'image/png'});
+  }catch(e){ file=null; }
+  try{
+    if(file && navigator.canShare && navigator.canShare({files:[file]})){
+      navigator.share({files:[file], title:name}).catch(function(){});
+      return 'share';
+    }
+  }catch(e){}
+  try{
+    if(file && window.showSaveFilePicker){
+      showSaveFilePicker({suggestedName:name, types:[{description:'PNG 图片', accept:{'image/png':['.png']}}]})
+        .then(function(h){ return h.createWritable(); })
+        .then(function(w){ return w.write(file).then(function(){ return w.close(); }); })
+        .then(function(){ toast('已保存 ✅'); })
+        .catch(function(e){ if(e&&e.name!=='AbortError') toast('保存没走通 · 电脑右键 / 手机长按图片另存'); });
+      return 'picker';
+    }
+  }catch(e){}
+  try{
+    const a=document.createElement('a'); a.href=url; a.download=name;
+    document.body.appendChild(a); a.click(); try{a.remove()}catch(e){}
+    return 'dl';
+  }catch(e){}
+  return 'none';
+}
 let lastCard=null;
 $s('#btnSaveImg').onclick=()=>{
   const doSave=c=>{
@@ -8345,14 +8380,13 @@ $s('#btnSaveImg').onclick=()=>{
       const mask=document.createElement('div'); mask.className='pmShotMask';
       mask.innerHTML='<div class="pmShotCard"><img src="'+url+'" alt="战绩勋章卡">'
         +'<div class="pmShotBar"><button class="main" id="miDl">💾 保存到相册</button><button id="miClose">关闭</button></div>'
-        +'<div style="font-size:11px;color:#8a95ad;text-align:center;padding:0 8px 8px">若没自动保存，请长按上方图片或截图保存</div></div>';
+        +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">若没自动保存：<b>电脑</b>右键图片→图片另存为 · <b>手机</b>长按图片→保存图片</div></div>';
       document.body.appendChild(mask);
       mask.onclick=function(e){ if(e.target===mask||e.target.id==='miClose') mask.remove(); };
       const miDl=mask.querySelector('#miDl');
       if(miDl) miDl.onclick=function(){
-        const a=document.createElement('a'); a.href=url; a.download=nm;
-        document.body.appendChild(a); a.click(); try{a.remove()}catch(e){}
-        toast('已尝试保存 · 没反应就长按图片');
+        const ch=pmSavePic(url, nm);
+        toast(ch==='share'?'已调出系统分享 · 选「存储图像/保存到相册」':(ch==='picker'?'请选择保存位置 ✅':'已尝试下载 · 没反应就右键/长按图片'));
       };
       toast('已生成战绩勋章卡 ✅');
     }catch(e){ toast('保存失败，可长按页面上的卡片图保存'); }
@@ -10498,18 +10532,16 @@ function pmSnapshot(){
         const mask=document.createElement('div'); mask.className='pmShotMask';
         mask.innerHTML='<div class="pmShotCard"><img src="'+url+'" alt="我的小院子留念"><div class="pmShotBar"'
           +'><button class="main" id="pmShotDl">💾 保存照片</button><button id="pmShotClose">关闭</button></div>'
-          +'<div style="font-size:11px;color:#8a95ad;text-align:center;padding:0 8px 8px">若没自动保存，请长按上方图片或截图保存</div></div>';
+          +'<div style="font-size:11.5px;color:#5a6373;text-align:center;padding:0 8px 8px;line-height:1.5">若没自动保存：<b>电脑</b>右键图片→图片另存为 · <b>手机</b>长按图片→保存图片</div></div>';
         document.body.appendChild(mask);
         mask.onclick=function(e){
           if(e.target===mask||e.target.id==='pmShotClose') mask.remove();
         };
         const dl=mask.querySelector('#pmShotDl');
         if(dl) dl.onclick=function(){
-          const a=document.createElement('a'); a.href=url;
-          a.download='AI单词闯关-'+((P.n)||'我的宠物')+'-Lv'+(p.lv||1)+'.png';
-          document.body.appendChild(a); a.click();
-          try{a.remove()}catch(e){}
-          toast('📷 已尝试保存 · 没自动存下就长按图片或截图');
+          const nm2='AI单词闯关-'+((P.n)||'我的宠物')+'-Lv'+(p.lv||1)+'.png';
+          const ch=pmSavePic(url, nm2);
+          toast(ch==='share'?'📷 已调出系统分享 · 选「存储图像/保存到相册」':(ch==='picker'?'📷 请选择保存位置 ✅':'📷 已尝试下载 · 没反应就右键/长按图片'));
         };
         toast('📷 生成留念卡片啦 · 点蓝色按钮保存');
       }catch(e){
